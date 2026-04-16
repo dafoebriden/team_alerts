@@ -10,10 +10,16 @@ from typing import Any
 
 import requests
 
-from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, DISCORD_REQUEST_TIMEOUT
+from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, DEFAULT_CHUNK_SIZE, DISCORD_REQUEST_TIMEOUT
+from team_alerts.discord_embeds import allowed_mentions_payload, build_alert_embed
 from team_alerts.discord_options import DiscordTransportOptions, GitHubLinkOptions
 from team_alerts.exceptions import ConfigurationError
-from team_alerts.formatters import format_alert_discord_chunks, format_exception
+from team_alerts.formatters import (
+    append_footer_to_last_chunk,
+    format_alert_discord_chunks,
+    format_exception,
+    split_long_text,
+)
 from team_alerts.links import github_blob_url, pick_github_frame, repo_relative_path
 from team_alerts.models import Alert
 from team_alerts.result import SendResult
@@ -45,6 +51,8 @@ class DiscordTransport(BaseTransport):
 
     def send(self, alert: Alert) -> SendResult:
         prepared = _enrich_alert(alert, self._options)
+        mentions = allowed_mentions_payload(self._options.allowed_mentions)
+
         tb_text = (
             format_exception(prepared.exception) if prepared.exception is not None else ""
         )
@@ -56,6 +64,9 @@ class DiscordTransport(BaseTransport):
             and len(tb_text) > threshold
         )
 
+        if self._options.use_embeds:
+            return self._send_embed_mode(prepared, tb_text, use_file, mentions)
+
         if use_file:
             chunks = format_alert_discord_chunks(
                 prepared,
@@ -64,33 +75,98 @@ class DiscordTransport(BaseTransport):
                 metadata_url_link_style=self._options.metadata_url_link_style,
                 alert_banner=_alert_banner_line(self._options),
             )
+            chunks = append_footer_to_last_chunk(chunks, self._options.alert_footer)
             tb_bytes = _traceback_attachment_bytes(tb_text, self._options.max_attachment_bytes)
             first, rest = chunks[0], chunks[1:]
-            last = self._post_multipart(first, tb_bytes, self._options.exception_attachment_filename)
+            last = self._post_multipart(
+                content=first,
+                file_bytes=tb_bytes,
+                filename=self._options.exception_attachment_filename,
+                mentions=mentions,
+            )
             if not last.success:
                 return last
             for content in rest:
-                last = self._post_payload({"content": content})
+                last = self._post_payload({"content": content}, mentions=mentions)
                 if not last.success:
                     return last
             return last
 
+        chunks = list(
+            format_alert_discord_chunks(
+                prepared,
+                metadata_url_link_style=self._options.metadata_url_link_style,
+                alert_banner=_alert_banner_line(self._options),
+            )
+        )
+        chunks = append_footer_to_last_chunk(chunks, self._options.alert_footer)
+
         last: SendResult | None = None
-        for content in format_alert_discord_chunks(
-            prepared,
-            metadata_url_link_style=self._options.metadata_url_link_style,
-            alert_banner=_alert_banner_line(self._options),
-        ):
-            last = self._post_payload({"content": content})
+        for content in chunks:
+            last = self._post_payload({"content": content}, mentions=mentions)
             if not last.success:
                 return last
         return last or SendResult(success=True, status_code=None, response_text="", error_message=None)
 
-    def _post_payload(self, payload: dict[str, Any]) -> SendResult:
+    def _send_embed_mode(
+        self,
+        alert: Alert,
+        tb_text: str,
+        use_file: bool,
+        mentions: dict[str, Any] | None,
+    ) -> SendResult:
+        threshold = self._options.attach_exception_over_chars
+        include_tb_in_embed = (
+            alert.exception is not None
+            and bool(tb_text)
+            and not use_file
+            and (threshold is None or len(tb_text) <= threshold)
+        )
+        exc_for_embed = tb_text if include_tb_in_embed else None
+
+        embed, overflow = build_alert_embed(
+            alert,
+            options=self._options,
+            include_exception_in_body=bool(exc_for_embed),
+            exception_text=exc_for_embed,
+        )
+
+        tail: list[str] = []
+        if overflow.strip():
+            tail.extend(split_long_text(overflow.strip(), chunk_size=DEFAULT_CHUNK_SIZE))
+        tail = append_footer_to_last_chunk(tail, self._options.alert_footer)
+
+        last: SendResult | None = None
+
+        if use_file:
+            tb_bytes = _traceback_attachment_bytes(tb_text, self._options.max_attachment_bytes)
+            note = "*(traceback attached)*"
+            last = self._post_multipart(
+                content=note,
+                file_bytes=tb_bytes,
+                filename=self._options.exception_attachment_filename,
+                embeds=[embed],
+                mentions=mentions,
+            )
+        else:
+            payload: dict[str, Any] = {"embeds": [embed]}
+            last = self._post_payload(payload, mentions=mentions)
+
+        if last is None or not last.success:
+            return last or SendResult(success=False, status_code=None, response_text="", error_message="send failed")
+
+        for content in tail:
+            last = self._post_payload({"content": content}, mentions=mentions)
+            if not last.success:
+                return last
+        return last
+
+    def _post_payload(self, payload: dict[str, Any], *, mentions: dict[str, Any] | None = None) -> SendResult:
+        body = _merge_mentions(payload, mentions)
         try:
             response = requests.post(
                 self._webhook_url,
-                json=payload,
+                json=body,
                 timeout=DISCORD_REQUEST_TIMEOUT,
             )
         except requests.RequestException as exc:
@@ -111,11 +187,22 @@ class DiscordTransport(BaseTransport):
             error_message=f"HTTP {response.status_code}",
         )
 
-    def _post_multipart(self, content: str, file_bytes: bytes, filename: str) -> SendResult:
-        payload = {
+    def _post_multipart(
+        self,
+        *,
+        content: str,
+        file_bytes: bytes,
+        filename: str,
+        embeds: list[dict[str, Any]] | None = None,
+        mentions: dict[str, Any] | None = None,
+    ) -> SendResult:
+        payload: dict[str, Any] = {
             "content": content or "*(see attachment for traceback)*",
             "attachments": [{"id": 0, "filename": filename, "description": "Python traceback"}],
         }
+        if embeds is not None:
+            payload["embeds"] = embeds
+        payload = _merge_mentions(payload, mentions)
         multipart: dict[str, Any] = {
             "payload_json": (None, json.dumps(payload), "application/json; charset=utf-8"),
             "files[0]": (filename, BytesIO(file_bytes), "text/plain; charset=utf-8"),
@@ -142,6 +229,14 @@ class DiscordTransport(BaseTransport):
             response_text=text,
             error_message=f"HTTP {response.status_code}",
         )
+
+
+def _merge_mentions(payload: dict[str, Any], mentions: dict[str, Any] | None) -> dict[str, Any]:
+    if not mentions:
+        return payload
+    merged = dict(payload)
+    merged["allowed_mentions"] = mentions
+    return merged
 
 
 def _alert_banner_line(opts: DiscordTransportOptions) -> str:
