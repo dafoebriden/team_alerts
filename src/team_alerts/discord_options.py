@@ -10,6 +10,41 @@ MetadataUrlLinkStyle = Literal["angle", "markdown"]
 
 
 @dataclass(slots=True)
+class AllowedMentionsOptions:
+    """
+    Explicit Discord ``allowed_mentions`` wiring (safe defaults).
+
+    Only numeric snowflake IDs you list under ``role_ids`` / ``users`` are mentionable.
+    Nothing is parsed from message text, so stray ``@everyone`` in content does not ping.
+
+    Set ``allow_everyone`` only when you intentionally notify the whole channel.
+    """
+
+    role_ids: tuple[str, ...] = ()
+    user_ids: tuple[str, ...] = ()
+    allow_everyone: bool = False
+
+    @classmethod
+    def from_env(cls) -> AllowedMentionsOptions | None:
+        """
+        Parse ``TEAM_ALERTS_ALLOWED_ROLE_IDS`` and ``TEAM_ALERTS_ALLOWED_USER_IDS``
+        (comma-separated snowflakes). Returns ``None`` when both are empty and
+        ``TEAM_ALERTS_ALLOW_EVERYONE_MENTION`` is unset/false.
+        """
+        roles_raw = os.environ.get("TEAM_ALERTS_ALLOWED_ROLE_IDS", "").strip()
+        users_raw = os.environ.get("TEAM_ALERTS_ALLOWED_USER_IDS", "").strip()
+        everyone_raw = os.environ.get("TEAM_ALERTS_ALLOW_EVERYONE_MENTION", "").strip().lower()
+        allow_everyone = everyone_raw in ("1", "true", "yes", "on")
+
+        role_ids = tuple(r.strip() for r in roles_raw.split(",") if r.strip())
+        user_ids = tuple(u.strip() for u in users_raw.split(",") if u.strip())
+
+        if not role_ids and not user_ids and not allow_everyone:
+            return None
+        return cls(role_ids=role_ids, user_ids=user_ids, allow_everyone=allow_everyone)
+
+
+@dataclass(slots=True)
 class GitHubLinkOptions:
     """
     When set on :class:`DiscordTransportOptions`, a GitHub ``/blob/`` link for the
@@ -86,6 +121,24 @@ class DiscordTransportOptions:
       custom divider or short label (e.g. ``"━━━ production ━━━"``).
     """
 
+    use_embeds: bool = False
+    """When true, send a rich embed (color by severity, fields, optional timestamp)."""
+
+    allowed_mentions: AllowedMentionsOptions | None = None
+    """Optional explicit role/user pings; see :class:`AllowedMentionsOptions`."""
+
+    alert_footer: str | None = None
+    """
+    Extra plain-text footer appended to the **last** webhook payload when an alert
+    is split across multiple posts (plain mode or embed continuations).
+    """
+
+    embed_footer_text: str | None = None
+    """Optional short line in the embed ``footer`` (distinct from ``alert_footer``)."""
+
+    embed_footer_append_service_env: bool = True
+    """When true and ``embed_footer_text`` is set, also append ``service · env``."""
+
     @classmethod
     def from_env(
         cls,
@@ -109,6 +162,13 @@ class DiscordTransportOptions:
         * ``TEAM_ALERTS_ALERT_BANNER`` — ``0`` / ``false`` / ``off`` to disable the top
           separator; any other non-empty value becomes a **custom** banner line
           (otherwise the package default is used)
+        * ``TEAM_ALERTS_USE_EMBEDS`` — ``1`` / ``true`` / ``yes`` / ``on`` for embed mode
+        * ``TEAM_ALERTS_ALERT_FOOTER`` — text appended on the **last** chunk when split
+        * ``TEAM_ALERTS_EMBED_FOOTER`` — optional embed footer line (embed mode)
+        * ``TEAM_ALERTS_ALLOWED_ROLE_IDS`` / ``TEAM_ALERTS_ALLOWED_USER_IDS`` — comma
+          snowflakes for :class:`AllowedMentionsOptions`
+        * ``TEAM_ALERTS_ALLOW_EVERYONE_MENTION`` — must be ``1``/``true`` to allow
+          ``@everyone`` (dangerous; off by default)
         """
         repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
         ref = (
@@ -148,6 +208,14 @@ class DiscordTransportOptions:
         elif banner_raw:
             alert_banner = banner_raw
 
+        embeds_raw = os.environ.get("TEAM_ALERTS_USE_EMBEDS", "").strip().lower()
+        use_embeds = embeds_raw in ("1", "true", "yes", "on")
+
+        alert_footer = os.environ.get("TEAM_ALERTS_ALERT_FOOTER", "").strip() or None
+        embed_footer = os.environ.get("TEAM_ALERTS_EMBED_FOOTER", "").strip() or None
+
+        allowed = AllowedMentionsOptions.from_env()
+
         return cls(
             attach_exception_over_chars=threshold,
             exception_attachment_filename=exception_attachment_filename,
@@ -155,6 +223,10 @@ class DiscordTransportOptions:
             env_metadata_keys=env_keys,
             metadata_url_link_style=link_style,
             alert_banner=alert_banner,
+            use_embeds=use_embeds,
+            allowed_mentions=allowed,
+            alert_footer=alert_footer,
+            embed_footer_text=embed_footer,
         )
 
 
