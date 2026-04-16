@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from team_alerts.constants import DISCORD_CONTENT_MAX_CHARS, DEFAULT_CHUNK_SIZE, Severity
@@ -13,6 +14,18 @@ from team_alerts.models import Alert
 def format_severity_label(severity: Severity) -> str:
     """Human-readable severity for plain-text messages."""
     return severity.value
+
+
+def discord_relative_timestamp(dt: datetime) -> str:
+    """
+    Format ``dt`` as a Discord relative timestamp (``<t:unix:R>``).
+
+    Naive datetimes are treated as UTC.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    ts = int(dt.astimezone(timezone.utc).timestamp())
+    return f"<t:{ts}:R>"
 
 
 def format_exception(exc: Exception, *, limit: int | None = None) -> str:
@@ -147,6 +160,27 @@ def format_alert_discord_chunks(
     return list(split_long_text(body, chunk_size=chunk_size))
 
 
+def append_footer_to_last_chunk(chunks: list[str], footer: str | None) -> list[str]:
+    """
+    Append ``footer`` to the last chunk when it fits under ``DISCORD_CONTENT_MAX_CHARS``;
+    otherwise append one or more new chunks (split) so the footer is never dropped.
+    """
+    if not footer or not footer.strip():
+        return list(chunks)
+    f = footer.strip()
+    if not chunks:
+        return list(split_long_text(f, chunk_size=DISCORD_CONTENT_MAX_CHARS))
+    out = list(chunks)
+    last = out[-1]
+    candidate = f"{last}\n{f}" if last else f
+    if len(candidate) <= DISCORD_CONTENT_MAX_CHARS:
+        out[-1] = candidate
+        return out
+    for piece in split_long_text(f, chunk_size=DISCORD_CONTENT_MAX_CHARS):
+        out.append(piece)
+    return out
+
+
 def _alert_body_parts(
     alert: Alert,
     *,
@@ -164,6 +198,10 @@ def _alert_body_parts(
 
     if alert.title:
         lines.append(f"**{_escape_backticks(alert.title)}**")
+
+    if alert.occurred_at is not None:
+        when = discord_relative_timestamp(alert.occurred_at)
+        lines.append(f"**When:** {when} (UTC)")
 
     lines.append(_escape_backticks(alert.message))
 
