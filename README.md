@@ -2,14 +2,17 @@
 
 Small, transport-oriented library for **structured operational alerts**. The first supported channel is **Discord** (incoming webhooks); the layout leaves room for Slack, email, or ticket systems later without renaming the package.
 
+Source repository: [github.com/dafoebriden/team_alerts](https://github.com/dafoebriden/team_alerts).
+
 ## Features
 
-- **`Alert`** model with severity, optional title, exception, metadata, service, and environment fields
-- **Pure formatters** for Discord-safe text (truncation and splitting for long payloads)
-- **`DiscordTransport`** using `requests` (`json=` for JSON posts; **multipart** when attaching tracebacks)
-- **`DiscordTransportOptions`** — optional GitHub deep links, static URLs, env-sourced metadata, and **file uploads** for long tracebacks
+- **`Alert`** model with severity, optional title, exception, metadata, service, environment, and optional **`occurred_at`** (UTC instant for Discord timestamps)
+- **Pure formatters** for Discord-safe text (truncation and splitting for long payloads), **`discord_relative_timestamp()`** for `<t:unix:R>` strings
+- **`DiscordTransport`** using `requests` (`json=` for JSON posts; **multipart** when attaching tracebacks; optional **embeds** on the first post)
+- **`DiscordTransportOptions`** — GitHub deep links, static URLs, env-sourced metadata, long tracebacks as **file uploads**, **embed mode** (`use_embeds`), **`allowed_mentions`** via **`AllowedMentionsOptions`**, and an **`alert_footer`** line on the **last** chunk when posts are split
 - **`AlertClient`** with `send`, `low`, `high`, and `critical` helpers
 - **`SendResult`** for simple success / HTTP / error reporting
+- **`github_blob_url()`** for advanced callers building GitHub links outside the transport
 
 ## Install
 
@@ -73,6 +76,42 @@ When `attach_exception_over_chars` is set and the formatted traceback is longer,
 
 GitHub URLs are merged into alert metadata (shown in the Discord body) **only** when `source_root` is set so traceback file paths can be relativized into the repo.
 
+### Embeds, timestamps, mentions, and last-chunk footers
+
+```python
+from datetime import datetime, timezone
+
+from team_alerts import (
+    Alert,
+    AlertClient,
+    AllowedMentionsOptions,
+    DiscordTransport,
+    DiscordTransportOptions,
+    Severity,
+)
+
+opts = DiscordTransportOptions(
+    use_embeds=True,
+    embed_footer_text="billing-api",
+    alert_footer="— end of alert —",  # last chunk only when split across posts
+    allowed_mentions=AllowedMentionsOptions(
+        role_ids=("987654321098765432",),  # explicit snowflakes only
+    ),
+)
+
+transport = DiscordTransport("https://discord.com/api/webhooks/...", options=opts)
+client = AlertClient(transport)
+
+client.send(
+    Alert(
+        message="Disk usage above 90%",
+        severity=Severity.HIGH,
+        occurred_at=datetime.now(timezone.utc),
+        metadata={"host": "db-1"},
+    )
+)
+```
+
 ### Environment-based client
 
 ```python
@@ -99,6 +138,12 @@ client.low("Hello from env-configured webhook")
 | `TEAM_ALERTS_ENV_METADATA` | Comma-separated env var **names** to copy into alert metadata when present |
 | `TEAM_ALERTS_METADATA_URL_STYLE` | `markdown` (or `md` / `labeled`) for `[key](url)` metadata links; omit or any other value for `<url>` |
 | `TEAM_ALERTS_ALERT_BANNER` | `0` / `false` / `off` disables the top separator; any other non-empty string is a **custom** banner line (omit for the built-in default) |
+| `TEAM_ALERTS_USE_EMBEDS` | `1` / `true` / `yes` / `on` — send a rich embed (color by severity, fields, optional timestamp) |
+| `TEAM_ALERTS_ALERT_FOOTER` | Plain-text footer appended to the **last** webhook when an alert is split across multiple posts |
+| `TEAM_ALERTS_EMBED_FOOTER` | Optional short embed footer line (embed mode) |
+| `TEAM_ALERTS_ALLOWED_ROLE_IDS` | Comma-separated role snowflakes for `allowed_mentions` |
+| `TEAM_ALERTS_ALLOWED_USER_IDS` | Comma-separated user snowflakes for `allowed_mentions` |
+| `TEAM_ALERTS_ALLOW_EVERYONE_MENTION` | Must be `1` / `true` to allow `@everyone` (off by default) |
 
 ### `.env.local` for pytest
 
@@ -132,16 +177,15 @@ pytest tests/test_live_discord.py -v
 - Formatting lives in `team_alerts.formatters`; transports stay focused on HTTP and optional enrichment.
 - Metadata values that look like a single `http(s)` URL are sent as **clickable** links: default ``<url>`` (no preview), or ``[metadata_key](url)`` when ``DiscordTransportOptions.metadata_url_link_style="markdown"`` (closing ``)`` in URLs is percent-escaped for Discord markdown).
 - Each Discord post from ``DiscordTransport`` starts with a **banner line** (see ``DEFAULT_ALERT_BANNER_LINE`` in ``constants``) so consecutive alerts are easier to scan; only the **first** chunk includes it when a message is split (one newline after the banner, no extra blank line). Disable with ``alert_banner=""``.
+- **Embeds** (`use_embeds=True`): severity maps to embed color; metadata becomes titled fields; ``Alert.occurred_at`` sets embed ``timestamp`` and a **When:** ``<t:unix:R>`` line in the description. Long message text beyond the embed description limit continues in plain ``content`` on follow-up webhooks.
+- **``allowed_mentions``**: set ``DiscordTransportOptions.allowed_mentions`` to an ``AllowedMentionsOptions`` instance. Empty role/user lists with ``allow_everyone=False`` sends ``{"parse": []}`` so mentions are **not** parsed from free-form text; list explicit snowflakes to allow role/user pings. ``allow_everyone=True`` is opt-in for ``@everyone``.
+- **``alert_footer``**: separate from the top banner; appended to the **last** chunk (plain mode) or the last continuation ``content`` post in embed mode.
+- Missing or blank webhook URLs raise ``ConfigurationError`` at transport construction time.
 
 ### Ideas for later (not implemented)
 
-- **Embeds** for color-by-severity and titled fields (richer, more moving parts).
-- **Timestamps** (Discord ``<t:unix:R>``) in metadata when you pass a UTC instant.
-- **Role / user pings** via ``allowed_mentions`` (needs explicit, careful wiring so you do not ping everyone by accident).
-- **Extra footers** (separate from the default top banner line) for long multi-post alerts.
-- `DiscordTransport` splits oversized **message** content across multiple webhook posts; long **exceptions** can optionally go out as an attachment on the first post.
-- Missing or blank webhook URLs raise `ConfigurationError` at construction time.
-- `github_blob_url()` is exposed for advanced callers who build links themselves.
+- Richer embed layouts (author URL, images, multiple embeds per message).
+- Optional ``allowed_mentions.parse`` for roles/users parsed from message text (high risk; off by default).
 
 ## Requirements
 
