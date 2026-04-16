@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
-from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, Severity
-from team_alerts.discord_options import DiscordTransportOptions, GitHubLinkOptions
+from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, EMBED_COLOR_CRITICAL, Severity
+from team_alerts.discord_options import (
+    AllowedMentionsOptions,
+    DiscordTransportOptions,
+    GitHubLinkOptions,
+)
 from team_alerts.exceptions import ConfigurationError
 from team_alerts.models import Alert
 from team_alerts.transports.discord import DiscordTransport
@@ -156,3 +161,86 @@ def test_discord_transport_request_exception() -> None:
     assert result.status_code is None
     assert result.error_message is not None
     assert "timed out" in result.error_message
+
+
+def test_discord_transport_embed_mode_posts_embed() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    opts = DiscordTransportOptions(use_embeds=True)
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
+        result = transport.send(Alert(message="hello", severity=Severity.CRITICAL, title="T"))
+
+    assert result.success is True
+    kwargs = post.call_args.kwargs
+    assert "json" in kwargs
+    embeds = kwargs["json"]["embeds"]
+    assert len(embeds) == 1
+    assert embeds[0]["color"] == EMBED_COLOR_CRITICAL
+    assert embeds[0]["title"] == "T"
+    assert "hello" in embeds[0]["description"]
+
+
+def test_discord_transport_allowed_mentions_roles() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    mentions = AllowedMentionsOptions(role_ids=("111", "222"))
+    opts = DiscordTransportOptions(allowed_mentions=mentions)
+
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
+        transport.send(Alert(message="m", severity=Severity.LOW))
+
+    assert post.call_args.kwargs["json"]["allowed_mentions"] == {
+        "parse": [],
+        "roles": ["111", "222"],
+    }
+
+
+def test_discord_transport_alert_footer_on_last_chunk() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    opts = DiscordTransportOptions(alert_banner="", alert_footer="— end —")
+    huge = "LINE\n" * 1500
+    alert = Alert(message=huge, severity=Severity.LOW)
+
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
+        result = transport.send(alert)
+
+    assert result.success is True
+    assert post.call_count >= 2
+    last = post.call_args_list[-1].kwargs["json"]["content"]
+    assert last.rstrip().endswith("— end —")
+
+
+def test_discord_transport_embed_mode_multipart_with_embed() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    opts = DiscordTransportOptions(use_embeds=True, attach_exception_over_chars=50)
+    alert = Alert(message="short", severity=Severity.HIGH, exception=ValueError("x"))
+
+    with patch("team_alerts.transports.discord.format_exception", return_value="E" * 200):
+        with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+            transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
+            result = transport.send(alert)
+
+    assert result.success is True
+    post.assert_called_once()
+    files = post.call_args.kwargs["files"]
+    payload = json.loads(files["payload_json"][1])
+    assert "embeds" in payload
+    assert payload["embeds"][0]["color"] is not None
+    assert "attachments" in payload

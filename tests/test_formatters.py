@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, DISCORD_CONTENT_MAX_CHARS, Severity
 from team_alerts.formatters import (
+    append_footer_to_last_chunk,
+    discord_relative_timestamp,
     format_alert_discord_chunks,
     format_alert_discord_text,
     format_exception,
@@ -171,3 +175,31 @@ def test_format_alert_respects_discord_max_length() -> None:
     alert = Alert(message="m" * (DISCORD_CONTENT_MAX_CHARS + 500), severity=Severity.CRITICAL)
     out = format_alert_discord_text(alert)
     assert len(out) <= DISCORD_CONTENT_MAX_CHARS
+
+
+def test_discord_relative_timestamp_utc() -> None:
+    dt = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    assert discord_relative_timestamp(dt) == "<t:1577836800:R>"
+
+
+def test_format_alert_includes_occurred_at_line() -> None:
+    dt = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    alert = Alert(message="m", severity=Severity.LOW, occurred_at=dt)
+    out = format_alert_discord_text(alert)
+    assert "When:" in out
+    assert "<t:1577836800:R>" in out
+
+
+def test_append_footer_to_last_chunk_appends() -> None:
+    chunks = ["a", "b"]
+    out = append_footer_to_last_chunk(chunks, "footer")
+    assert out == ["a", "b\nfooter"]
+
+
+def test_append_footer_to_last_chunk_new_chunk_when_full() -> None:
+    base = "x" * (DISCORD_CONTENT_MAX_CHARS - 1)
+    chunks = [base]
+    out = append_footer_to_last_chunk(chunks, "tail")
+    assert len(out) == 2
+    assert out[0] == base
+    assert "tail" in out[1]
