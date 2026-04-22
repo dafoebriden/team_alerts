@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import replace
 from io import BytesIO
 from typing import Any
 
 import requests
+from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 
 from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, DEFAULT_CHUNK_SIZE, DISCORD_REQUEST_TIMEOUT
 from team_alerts.discord_embeds import allowed_mentions_payload, build_alert_embed
@@ -16,14 +18,24 @@ from team_alerts.discord_options import DiscordTransportOptions, GitHubLinkOptio
 from team_alerts.exceptions import ConfigurationError
 from team_alerts.formatters import (
     append_footer_to_last_chunk,
+    apply_identity_markers_to_split_chunks,
     format_alert_discord_chunks,
     format_exception,
-    split_long_text,
 )
 from team_alerts.links import github_blob_url, pick_github_frame, repo_relative_path
 from team_alerts.models import Alert
 from team_alerts.result import SendResult
 from team_alerts.transports.base import BaseTransport
+from team_alerts.webhook_retry import is_retriable_http_status, sleep_before_retry
+
+
+def _use_embeds_effective(options: DiscordTransportOptions, alert: Alert) -> bool:
+    style = alert.discord_payload_style
+    if style == "embed":
+        return True
+    if style == "plain":
+        return False
+    return options.use_embeds
 
 
 class DiscordTransport(BaseTransport):
@@ -64,7 +76,7 @@ class DiscordTransport(BaseTransport):
             and len(tb_text) > threshold
         )
 
-        if self._options.use_embeds:
+        if _use_embeds_effective(self._options, prepared):
             return self._send_embed_mode(prepared, tb_text, use_file, mentions)
 
         if use_file:
@@ -115,77 +127,179 @@ class DiscordTransport(BaseTransport):
         use_file: bool,
         mentions: dict[str, Any] | None,
     ) -> SendResult:
-        threshold = self._options.attach_exception_over_chars
-        include_tb_in_embed = (
-            alert.exception is not None
-            and bool(tb_text)
-            and not use_file
-            and (threshold is None or len(tb_text) <= threshold)
-        )
-        exc_for_embed = tb_text if include_tb_in_embed else None
-
+        _ = use_file
         embed, overflow = build_alert_embed(
             alert,
             options=self._options,
-            include_exception_in_body=bool(exc_for_embed),
-            exception_text=exc_for_embed,
+            include_exception_in_body=False,
+            exception_text=None,
         )
 
-        tail: list[str] = []
-        if overflow.strip():
-            tail.extend(split_long_text(overflow.strip(), chunk_size=DEFAULT_CHUNK_SIZE))
-        tail = append_footer_to_last_chunk(tail, self._options.alert_footer)
+        footer = (self._options.alert_footer or "").strip()
+        overflow_text = overflow.strip()
+        has_tb = bool(tb_text)
+        files: list[tuple[str, bytes, str]] = []
 
-        last: SendResult | None = None
+        if overflow_text:
+            body = overflow_text
+            if footer and not has_tb:
+                body = f"{body}\n\n{footer}"
+            files.append(
+                (
+                    self._options.message_attachment_filename,
+                    _traceback_attachment_bytes(body, self._options.max_attachment_bytes),
+                    "Full message text",
+                )
+            )
+        if has_tb:
+            tb_body = tb_text
+            if footer:
+                tb_body = f"{tb_text}\n\n{footer}"
+            files.append(
+                (
+                    self._options.exception_attachment_filename,
+                    _traceback_attachment_bytes(tb_body, self._options.max_attachment_bytes),
+                    "Python traceback",
+                )
+            )
 
-        if use_file:
-            tb_bytes = _traceback_attachment_bytes(tb_text, self._options.max_attachment_bytes)
-            note = "*(traceback attached)*"
-            last = self._post_multipart(
-                content=note,
-                file_bytes=tb_bytes,
-                filename=self._options.exception_attachment_filename,
+        if files:
+            return self._post_multipart_files(
+                content="",
                 embeds=[embed],
+                files=files,
                 mentions=mentions,
             )
-        else:
-            payload: dict[str, Any] = {"embeds": [embed]}
-            last = self._post_payload(payload, mentions=mentions)
 
-        if last is None or not last.success:
-            return last or SendResult(success=False, status_code=None, response_text="", error_message="send failed")
-
-        for content in tail:
-            last = self._post_payload({"content": content}, mentions=mentions)
-            if not last.success:
-                return last
-        return last
+        payload = _embed_json_payload(embed, footer or None)
+        return self._post_payload(payload, mentions=mentions)
 
     def _post_payload(self, payload: dict[str, Any], *, mentions: dict[str, Any] | None = None) -> SendResult:
         body = _merge_mentions(payload, mentions)
-        try:
-            response = requests.post(
-                self._webhook_url,
-                json=body,
-                timeout=DISCORD_REQUEST_TIMEOUT,
-            )
-        except requests.RequestException as exc:
-            return SendResult(
-                success=False,
-                status_code=None,
-                response_text="",
-                error_message=str(exc),
-            )
+        opts = self._options
+        max_attempts = max(1, opts.webhook_max_attempts)
+        for attempt in range(max_attempts):
+            try:
+                response = requests.post(
+                    self._webhook_url,
+                    json=body,
+                    timeout=DISCORD_REQUEST_TIMEOUT,
+                )
+            except (ConnectionError, Timeout, ChunkedEncodingError) as exc:
+                last = SendResult(
+                    success=False,
+                    status_code=None,
+                    response_text="",
+                    error_message=str(exc),
+                )
+                if attempt >= max_attempts - 1:
+                    return last
+                sleep_before_retry(
+                    attempt_index=attempt,
+                    response=None,
+                    base_delay_seconds=opts.webhook_retry_base_delay_seconds,
+                    max_delay_seconds=opts.webhook_retry_max_delay_seconds,
+                    jitter_seconds=opts.webhook_retry_jitter_seconds,
+                    sleep_fn=time.sleep,
+                )
+                continue
 
-        text = response.text or ""
-        if response.ok:
-            return SendResult(success=True, status_code=response.status_code, response_text=text)
-        return SendResult(
-            success=False,
-            status_code=response.status_code,
-            response_text=text,
-            error_message=f"HTTP {response.status_code}",
-        )
+            text = response.text or ""
+            if response.ok:
+                return SendResult(success=True, status_code=response.status_code, response_text=text)
+            last = SendResult(
+                success=False,
+                status_code=response.status_code,
+                response_text=text,
+                error_message=f"HTTP {response.status_code}",
+            )
+            if attempt >= max_attempts - 1 or not is_retriable_http_status(response.status_code):
+                return last
+            sleep_before_retry(
+                attempt_index=attempt,
+                response=response,
+                base_delay_seconds=opts.webhook_retry_base_delay_seconds,
+                max_delay_seconds=opts.webhook_retry_max_delay_seconds,
+                jitter_seconds=opts.webhook_retry_jitter_seconds,
+                sleep_fn=time.sleep,
+            )
+        return SendResult(success=False, status_code=None, response_text="", error_message="send failed")
+
+    def _post_multipart_files(
+        self,
+        *,
+        content: str,
+        embeds: list[dict[str, Any]] | None,
+        files: list[tuple[str, bytes, str]],
+        mentions: dict[str, Any] | None,
+    ) -> SendResult:
+        payload: dict[str, Any] = {}
+        if content:
+            payload["content"] = content
+        if embeds is not None:
+            payload["embeds"] = embeds
+        attachments: list[dict[str, Any]] = []
+        multipart: dict[str, Any] = {}
+        for i, (filename, file_bytes, description) in enumerate(files):
+            desc = description if len(description) <= 100 else description[:99] + "…"
+            attachments.append({"id": i, "filename": filename, "description": desc})
+            multipart[f"files[{i}]"] = (filename, BytesIO(file_bytes), "text/plain; charset=utf-8")
+        payload["attachments"] = attachments
+        payload = _merge_mentions(payload, mentions)
+        opts = self._options
+        max_attempts = max(1, opts.webhook_max_attempts)
+        for attempt in range(max_attempts):
+            attempt_multipart = dict(multipart)
+            attempt_multipart["payload_json"] = (
+                None,
+                json.dumps(payload),
+                "application/json; charset=utf-8",
+            )
+            try:
+                response = requests.post(
+                    self._webhook_url,
+                    files=attempt_multipart,
+                    timeout=DISCORD_REQUEST_TIMEOUT,
+                )
+            except (ConnectionError, Timeout, ChunkedEncodingError) as exc:
+                last = SendResult(
+                    success=False,
+                    status_code=None,
+                    response_text="",
+                    error_message=str(exc),
+                )
+                if attempt >= max_attempts - 1:
+                    return last
+                sleep_before_retry(
+                    attempt_index=attempt,
+                    response=None,
+                    base_delay_seconds=opts.webhook_retry_base_delay_seconds,
+                    max_delay_seconds=opts.webhook_retry_max_delay_seconds,
+                    jitter_seconds=opts.webhook_retry_jitter_seconds,
+                    sleep_fn=time.sleep,
+                )
+                continue
+
+            text = response.text or ""
+            if response.ok:
+                return SendResult(success=True, status_code=response.status_code, response_text=text)
+            last = SendResult(
+                success=False,
+                status_code=response.status_code,
+                response_text=text,
+                error_message=f"HTTP {response.status_code}",
+            )
+            if attempt >= max_attempts - 1 or not is_retriable_http_status(response.status_code):
+                return last
+            sleep_before_retry(
+                attempt_index=attempt,
+                response=response,
+                base_delay_seconds=opts.webhook_retry_base_delay_seconds,
+                max_delay_seconds=opts.webhook_retry_max_delay_seconds,
+                jitter_seconds=opts.webhook_retry_jitter_seconds,
+                sleep_fn=time.sleep,
+            )
+        return SendResult(success=False, status_code=None, response_text="", error_message="send failed")
 
     def _post_multipart(
         self,
@@ -196,39 +310,20 @@ class DiscordTransport(BaseTransport):
         embeds: list[dict[str, Any]] | None = None,
         mentions: dict[str, Any] | None = None,
     ) -> SendResult:
-        payload: dict[str, Any] = {
-            "content": content or "*(see attachment for traceback)*",
-            "attachments": [{"id": 0, "filename": filename, "description": "Python traceback"}],
-        }
-        if embeds is not None:
-            payload["embeds"] = embeds
-        payload = _merge_mentions(payload, mentions)
-        multipart: dict[str, Any] = {
-            "payload_json": (None, json.dumps(payload), "application/json; charset=utf-8"),
-            "files[0]": (filename, BytesIO(file_bytes), "text/plain; charset=utf-8"),
-        }
-        try:
-            response = requests.post(
-                self._webhook_url,
-                files=multipart,
-                timeout=DISCORD_REQUEST_TIMEOUT,
-            )
-        except requests.RequestException as exc:
-            return SendResult(
-                success=False,
-                status_code=None,
-                response_text="",
-                error_message=str(exc),
-            )
-        text = response.text or ""
-        if response.ok:
-            return SendResult(success=True, status_code=response.status_code, response_text=text)
-        return SendResult(
-            success=False,
-            status_code=response.status_code,
-            response_text=text,
-            error_message=f"HTTP {response.status_code}",
+        body = content or "*(see attachment for traceback)*"
+        return self._post_multipart_files(
+            content=body,
+            embeds=embeds,
+            files=[(filename, file_bytes, "Python traceback")],
+            mentions=mentions,
         )
+
+
+def _embed_json_payload(embed: dict[str, Any], footer: str | None) -> dict[str, Any]:
+    out: dict[str, Any] = {"embeds": [embed]}
+    if footer:
+        out["content"] = footer
+    return out
 
 
 def _merge_mentions(payload: dict[str, Any], mentions: dict[str, Any] | None) -> dict[str, Any]:

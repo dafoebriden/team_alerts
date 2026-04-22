@@ -89,6 +89,9 @@ class DiscordTransportOptions:
     exception_attachment_filename: str = "traceback.txt"
     """Filename for the traceback attachment."""
 
+    message_attachment_filename: str = "message.txt"
+    """Filename when embed mode moves overflow message text into an attachment."""
+
     max_attachment_bytes: int = 8_000_000
     """Hard cap on attachment payload (bytes); longer text is truncated with a note."""
 
@@ -121,7 +124,7 @@ class DiscordTransportOptions:
       custom divider or short label (e.g. ``"━━━ production ━━━"``).
     """
 
-    use_embeds: bool = False
+    use_embeds: bool = True
     """When true, send a rich embed (color by severity, fields, optional timestamp)."""
 
     allowed_mentions: AllowedMentionsOptions | None = None
@@ -136,8 +139,23 @@ class DiscordTransportOptions:
     embed_footer_text: str | None = None
     """Optional short line in the embed ``footer`` (distinct from ``alert_footer``)."""
 
-    embed_footer_append_service_env: bool = True
-    """When true and ``embed_footer_text`` is set, also append ``service · env``."""
+    embed_footer_append_service_env: bool = False
+    """When true and ``embed_footer_text`` is set, also append ``service · env`` to the embed footer."""
+
+    webhook_max_attempts: int = 3
+    """
+    Total HTTP attempts per webhook POST (including the first). Retries apply only
+    to the chunk being sent, not to earlier chunks of a split alert.
+    """
+
+    webhook_retry_base_delay_seconds: float = 0.5
+    """Initial backoff base for retries (seconds); grows exponentially."""
+
+    webhook_retry_max_delay_seconds: float = 60.0
+    """Upper bound for a single sleep before a retry (seconds)."""
+
+    webhook_retry_jitter_seconds: float = 0.25
+    """Random jitter in ``[0, jitter]`` added to backoff sleeps."""
 
     @classmethod
     def from_env(
@@ -162,13 +180,17 @@ class DiscordTransportOptions:
         * ``TEAM_ALERTS_ALERT_BANNER`` — ``0`` / ``false`` / ``off`` to disable the top
           separator; any other non-empty value becomes a **custom** banner line
           (otherwise the package default is used)
-        * ``TEAM_ALERTS_USE_EMBEDS`` — ``1`` / ``true`` / ``yes`` / ``on`` for embed mode
+        * ``TEAM_ALERTS_USE_EMBEDS`` — ``0`` / ``false`` / ``no`` / ``off`` / ``plain`` to
+          force **plain** ``content``; ``1`` / ``true`` / ``yes`` / ``on`` / ``embed`` for
+          embeds (default is embeds **on** when this variable is unset)
         * ``TEAM_ALERTS_ALERT_FOOTER`` — text appended on the **last** chunk when split
         * ``TEAM_ALERTS_EMBED_FOOTER`` — optional embed footer line (embed mode)
         * ``TEAM_ALERTS_ALLOWED_ROLE_IDS`` / ``TEAM_ALERTS_ALLOWED_USER_IDS`` — comma
           snowflakes for :class:`AllowedMentionsOptions`
         * ``TEAM_ALERTS_ALLOW_EVERYONE_MENTION`` — must be ``1``/``true`` to allow
           ``@everyone`` (dangerous; off by default)
+        * ``TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS`` — positive integer; max attempts per
+          HTTP POST (default ``3`` when unset)
         """
         repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
         ref = (
@@ -209,12 +231,21 @@ class DiscordTransportOptions:
             alert_banner = banner_raw
 
         embeds_raw = os.environ.get("TEAM_ALERTS_USE_EMBEDS", "").strip().lower()
-        use_embeds = embeds_raw in ("1", "true", "yes", "on")
+        use_embeds = True
+        if embeds_raw in ("0", "false", "no", "off", "plain", "raw"):
+            use_embeds = False
+        elif embeds_raw in ("1", "true", "yes", "on", "embed"):
+            use_embeds = True
 
         alert_footer = os.environ.get("TEAM_ALERTS_ALERT_FOOTER", "").strip() or None
         embed_footer = os.environ.get("TEAM_ALERTS_EMBED_FOOTER", "").strip() or None
 
         allowed = AllowedMentionsOptions.from_env()
+
+        max_attempts_raw = os.environ.get("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "").strip()
+        webhook_max_attempts = 3
+        if max_attempts_raw.isdigit() and int(max_attempts_raw) >= 1:
+            webhook_max_attempts = int(max_attempts_raw)
 
         return cls(
             attach_exception_over_chars=threshold,
@@ -227,6 +258,7 @@ class DiscordTransportOptions:
             allowed_mentions=allowed,
             alert_footer=alert_footer,
             embed_footer_text=embed_footer,
+            webhook_max_attempts=webhook_max_attempts,
         )
 
 

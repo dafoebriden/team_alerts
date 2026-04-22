@@ -16,6 +16,26 @@ def format_severity_label(severity: Severity) -> str:
     return severity.value
 
 
+_SEVERITY_BAR_FILLED: dict[Severity, int] = {
+    Severity.LOW: 2,
+    Severity.MEDIUM: 4,
+    Severity.HIGH: 7,
+    Severity.CRITICAL: 10,
+}
+_LEVEL_BAR_WIDTH = 10
+
+
+def format_severity_with_level_bar(severity: Severity) -> str:
+    """
+    Severity label plus a short monospace bar (filled vs empty blocks) for quick
+    visual level scanning in Discord.
+    """
+    label = format_severity_label(severity)
+    filled = _SEVERITY_BAR_FILLED[severity]
+    bar = "\u2588" * filled + "\u2591" * (_LEVEL_BAR_WIDTH - filled)
+    return f"**{label}**  `{bar}`"
+
+
 def discord_relative_timestamp(dt: datetime) -> str:
     """
     Format ``dt`` as a Discord relative timestamp (``<t:unix:R>``).
@@ -95,6 +115,86 @@ def _escape_backticks(text: str) -> str:
     return text.replace("`", "'")
 
 
+def alert_has_identity_fields(alert: Alert) -> bool:
+    """True when ``correlation_id``, ``run_id``, or ``dedupe_key`` is set."""
+    return bool(alert.correlation_id or alert.run_id or alert.dedupe_key)
+
+
+def _alert_identity_lines(alert: Alert) -> list[str]:
+    lines: list[str] = []
+    if alert.correlation_id:
+        lines.append(f"**correlation_id:** `{_escape_backticks(alert.correlation_id)}`")
+    if alert.run_id:
+        lines.append(f"**run_id:** `{_escape_backticks(alert.run_id)}`")
+    if alert.dedupe_key:
+        lines.append(f"**dedupe_key:** `{_escape_backticks(alert.dedupe_key)}`")
+    return lines
+
+
+def _compact_identity_marker(alert: Alert) -> str:
+    bits: list[str] = []
+    if alert.correlation_id:
+        bits.append(f"correlation_id=`{_escape_backticks(alert.correlation_id)}`")
+    if alert.run_id:
+        bits.append(f"run_id=`{_escape_backticks(alert.run_id)}`")
+    if alert.dedupe_key:
+        bits.append(f"dedupe_key=`{_escape_backticks(alert.dedupe_key)}`")
+    return " · ".join(bits)
+
+
+def effective_split_chunk_size_for_identity_markers(
+    alert: Alert,
+    requested_chunk_size: int,
+    *,
+    prefix_on_every_chunk: bool,
+) -> int:
+    """
+    Reduce split size so ``**[n/m]**`` + compact identity marker + body stays within
+    Discord's ``2000`` character ``content`` cap after ``apply_identity_markers_to_split_chunks``.
+    """
+    if not alert_has_identity_fields(alert):
+        return requested_chunk_size
+    marker = _compact_identity_marker(alert)
+    header_reserve = 36 if not prefix_on_every_chunk else 40
+    overhead = len(marker) + header_reserve
+    limit = DISCORD_CONTENT_MAX_CHARS - overhead
+    return min(requested_chunk_size, max(200, limit))
+
+
+def apply_identity_markers_to_split_chunks(
+    chunks: list[str],
+    alert: Alert,
+    *,
+    leading_chunk_includes_identity: bool,
+) -> list[str]:
+    """
+    Prefix split webhook payloads so identifiers survive partial delivery.
+
+    When ``leading_chunk_includes_identity`` is true (plain multi-chunk alerts),
+    only chunks after the first are prefixed. When false (e.g. embed overflow
+    tails), every chunk is prefixed because no earlier payload carried the lines.
+    """
+    if not chunks:
+        return []
+    if not alert_has_identity_fields(alert):
+        return list(chunks)
+    marker = _compact_identity_marker(alert)
+    total = len(chunks)
+    if total == 1 and not leading_chunk_includes_identity:
+        return [f"**[1/1]** {marker}\n\n{chunks[0]}"]
+    if leading_chunk_includes_identity:
+        if total <= 1:
+            return list(chunks)
+        out = [chunks[0]]
+        for i in range(1, total):
+            out.append(f"**[{i + 1}/{total}]** {marker}\n\n{chunks[i]}")
+        return out
+    out = []
+    for i, chunk in enumerate(chunks):
+        out.append(f"**[{i + 1}/{total}]** {marker}\n\n{chunk}")
+    return out
+
+
 def _normalize_banner_line(alert_banner: str) -> str:
     """Return a single sanitized banner line, or empty string when disabled."""
     if not alert_banner:
@@ -157,7 +257,13 @@ def format_alert_discord_chunks(
     line = _normalize_banner_line(alert_banner)
     if line:
         body = f"{line}\n{body}"
-    return list(split_long_text(body, chunk_size=chunk_size))
+    eff = effective_split_chunk_size_for_identity_markers(
+        alert, chunk_size, prefix_on_every_chunk=False
+    )
+    chunks = list(split_long_text(body, chunk_size=eff))
+    return apply_identity_markers_to_split_chunks(
+        chunks, alert, leading_chunk_includes_identity=True
+    )
 
 
 def append_footer_to_last_chunk(chunks: list[str], footer: str | None) -> list[str]:
@@ -189,12 +295,12 @@ def _alert_body_parts(
     metadata_url_link_style: MetadataUrlLinkStyle = "angle",
 ) -> list[str]:
     lines: list[str] = []
-    header_bits: list[str] = [f"**[{format_severity_label(alert.severity)}]**"]
+    lines.append(format_severity_with_level_bar(alert.severity))
     if alert.service:
-        header_bits.append(f"service=`{ _escape_backticks(alert.service)}`")
+        lines.append(f"**Service:** `{_escape_backticks(alert.service)}`")
     if alert.environment:
-        header_bits.append(f"env=`{_escape_backticks(alert.environment)}`")
-    lines.append(" ".join(header_bits))
+        lines.append(f"**Environment:** `{_escape_backticks(alert.environment)}`")
+    lines.extend(_alert_identity_lines(alert))
 
     if alert.title:
         lines.append(f"**{_escape_backticks(alert.title)}**")

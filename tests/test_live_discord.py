@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -37,34 +38,54 @@ def _assert_send_ok(result, *, label: str) -> None:
 
 
 def test_live_plain_operational_ping() -> None:
-    """Routine low-severity notice (deploy marker, smoke check)."""
+    """Low-severity notice on the default transport (rich embed, not plain text)."""
     client = AlertClient.from_discord_webhook_env()
     result = client.low(
-        "Scheduled job finished successfully; no action required.",
-        title="Live suite: operational ping",
-        service="team_alerts",
-        environment=os.environ.get("PYTEST_CURRENT_TEST", "pytest")[:80],
+        "Nightly eligibility export finished within SLA; no operator action required.",
+        title="Scheduled export completed",
+        service="scheduling-worker",
+        environment=os.environ.get("DEPLOY_ENV", os.environ.get("ENV", "staging")),
+        run_id=f"nightly-export-{uuid.uuid4().hex[:10]}",
     )
-    _assert_send_ok(result, label="plain ping")
+    _assert_send_ok(result, label="embed ping")
+
+
+def test_live_explicit_plain_text_payload() -> None:
+    """One alert forced to classic ``content`` layout (validates ``discord_payload_style='plain'``)."""
+    client = AlertClient.from_discord_webhook_env()
+    result = client.send(
+        Alert(
+            message="Canary check: plain-text path still delivers to this webhook.",
+            severity=Severity.LOW,
+            title="Synthetic canary",
+            service="observability",
+            environment=os.environ.get("ENV", "staging"),
+            discord_payload_style="plain",
+        )
+    )
+    _assert_send_ok(result, label="plain canary")
 
 
 def test_live_upstream_dependency_failure() -> None:
     """Typical API / dependency outage: HIGH with structured metadata."""
     client = AlertClient.from_discord_webhook_env()
+    cid = str(uuid.uuid4())
     alert = Alert(
         message=(
-            "Brightree SalesOrder API returned HTTP 503 three times in a row. "
-            "Circuit breaker opened; intake queue paused for 60s."
+            "SalesOrder API returned HTTP 503 on three consecutive attempts. "
+            "Circuit breaker opened; intake paused for 60 seconds before automatic retry."
         ),
         severity=Severity.HIGH,
-        title="Live suite: upstream dependency",
+        title="Upstream EHR API unavailable",
         service="lehans-webhook",
-        environment=os.environ.get("ENV", "local"),
+        environment=os.environ.get("ENV", "production"),
+        correlation_id=cid,
+        run_id=f"ingest-{uuid.uuid4().hex[:12]}",
+        dedupe_key="dependency:brightree:salesorder:503",
         metadata={
             "endpoint": "https://api.brightree.net/…/SalesOrder",
             "attempts": 3,
             "last_status": 503,
-            "correlation_id": str(uuid.uuid4()),
         },
     )
     result = client.send(alert)
@@ -72,7 +93,7 @@ def test_live_upstream_dependency_failure() -> None:
 
 
 def test_live_handler_exception_with_traceback() -> None:
-    """Webhook-style failure: real exception so Discord shows a traceback block."""
+    """Critical failure: embed summary plus full traceback as ``traceback.txt`` on the same post."""
 
     def _inner_parse_payload(raw: dict) -> str:
         if "submission_id" not in raw:
@@ -92,44 +113,52 @@ def test_live_handler_exception_with_traceback() -> None:
     assert exc is not None
     client = AlertClient.from_discord_webhook_env()
     alert = Alert(
-        message="Jotform webhook could not be routed: missing submission_id on payload.",
+        message=(
+            "Could not route inbound form webhook: payload is missing submission_id. "
+            "Request was rejected before persistence."
+        ),
         severity=Severity.CRITICAL,
-        title="Live suite: handler exception",
+        title="Inbound webhook rejected",
         exception=exc,
         service="jotform-router",
-        environment=os.environ.get("ENV", "local"),
-        metadata={"form_id": "901234", "live_test": "test_live_discord"},
+        environment=os.environ.get("ENV", "production"),
+        correlation_id=str(uuid.uuid4()),
+        dedupe_key="jotform:webhook:missing_submission_id",
+        metadata={"form_id": "901234", "ingress": "public-webhook"},
     )
     result = client.send(alert)
     _assert_send_ok(result, label="handler traceback")
 
 
 def test_live_long_log_tail_style_message() -> None:
-    """Simulates dumping last N lines of logs into the alert (chunked delivery)."""
+    """Long body exceeds embed description; overflow should arrive as ``message.txt`` on the same webhook."""
     lines = [f"[{i:04d}] worker=pool-A status=ok latency_ms={20 + (i % 17)}" for i in range(120)]
-    body = "Recent worker log tail (synthetic):\n" + "\n".join(lines)
+    body = "Last 120 lines from campaign-worker (rolling window):\n" + "\n".join(lines)
     client = AlertClient.from_discord_webhook_env()
+    cid = str(uuid.uuid4())
     result = client.high(
         body,
-        title="Live suite: long message / multi-chunk",
+        title="Worker log tail — elevated latency pattern",
         service="campaign-worker",
         environment="staging",
-        metadata={"line_count": len(lines), "truncation": "none"},
+        correlation_id=cid,
+        run_id=f"diag-{uuid.uuid4().hex[:12]}",
+        dedupe_key="campaign-worker:pool-a:latency-snapshot",
+        metadata={"line_count": len(lines), "window": "2m"},
     )
     _assert_send_ok(result, label="long message")
 
 
 def test_live_traceback_as_file_attachment() -> None:
     """
-    Forces multipart upload: short in-body summary + traceback.txt attachment.
-
-    Uses a low character threshold so a normal Python traceback exceeds it.
+    Deep stack: embed with summary + ``stacktrace.txt`` in the same multipart message
+    (embed mode always attaches tracebacks; filename overridden here).
     """
 
     def _deep_stack() -> None:
         def layer_three() -> None:
             raise RuntimeError(
-                "Simulated vendor timeout after 30s\n" + ("…waiting for ACK\n" * 80)
+                "Partner ACK window exceeded (30s)\n" + ("awaiting vendor response\n" * 80)
             )
 
         def layer_two() -> None:
@@ -148,22 +177,23 @@ def test_live_traceback_as_file_attachment() -> None:
 
     assert exc is not None
     opts = DiscordTransportOptions(
-        attach_exception_over_chars=400,
-        exception_attachment_filename="live_test_traceback.txt",
+        exception_attachment_filename="stacktrace.txt",
         static_links={
-            "docs": "https://discord.com/developers/docs/resources/webhook",
+            "runbook": "https://wiki.example.com/runbooks/vendor-timeouts",
         },
     )
     transport = DiscordTransport(WEBHOOK, options=opts)
     client = AlertClient(transport)
     alert = Alert(
-        message="Downstream call failed; full stack in attachment.",
+        message="Settlement file pull failed after repeated vendor timeouts. Full stack is in the attachment.",
         severity=Severity.CRITICAL,
-        title="Live suite: traceback attachment",
+        title="Vendor integration timeout",
         exception=exc,
-        service="team_alerts-live",
-        environment=os.environ.get("ENV", "local"),
-        metadata={"attachment_mode": "forced", "threshold_chars": 400},
+        service="payments-adapter",
+        environment=os.environ.get("ENV", "production"),
+        correlation_id=str(uuid.uuid4()),
+        run_id=f"payout-batch-{uuid.uuid4().hex[:10]}",
+        metadata={"attachment": "stacktrace.txt", "partner": "ach-vendor"},
     )
     result = client.send(alert)
     _assert_send_ok(result, label="traceback attachment")
@@ -179,13 +209,13 @@ def test_live_traceback_as_file_attachment() -> None:
     reason="Set GITHUB_REPOSITORY and GITHUB_SHA (or GIT_COMMIT / GITHUB_REF_NAME) for GitHub link live test.",
 )
 def test_live_github_metadata_when_ci_env_present() -> None:
-    """If CI-style env vars exist, verify GitHub line link appears in the message."""
+    """If CI-style env vars exist, GitHub URL should appear in embed metadata alongside traceback file."""
     opts = DiscordTransportOptions.from_env()
     if opts.github is None or not opts.github.source_root:
         pytest.skip("DiscordTransportOptions.from_env() did not yield github + source_root")
 
     try:
-        raise AssertionError("deliberate failure for GitHub link frame")
+        raise AssertionError("Schema validation failed on deploy artifact")
     except AssertionError as exc:
         pass_exc = exc
 
@@ -193,13 +223,46 @@ def test_live_github_metadata_when_ci_env_present() -> None:
     client = AlertClient(transport)
     result = client.send(
         Alert(
-            message="CI live check: exception frame should link to this test file.",
+            message="Deploy gate failed during artifact verification; see traceback for frame and repo link.",
             severity=Severity.HIGH,
-            title="Live suite: GitHub metadata",
+            title="Build verification failed",
             exception=pass_exc,
             service="github-actions",
             environment="ci",
-            metadata={"workflow": os.environ.get("GITHUB_WORKFLOW", "n/a")},
+            correlation_id=str(uuid.uuid4()),
+            metadata={"workflow": os.environ.get("GITHUB_WORKFLOW", "unknown")},
         )
     )
     _assert_send_ok(result, label="github metadata")
+
+
+def test_live_embed_mode_with_model_identity_fields() -> None:
+    """
+    Rich embed plus ``Alert.correlation_id`` / ``run_id`` / ``dedupe_key`` in the
+    embed description (validates recent embed + identity formatting).
+    """
+    base_opts = DiscordTransportOptions.from_env()
+    opts = replace(
+        base_opts,
+        alert_banner="",
+        embed_footer_text="reconciliation-monitor",
+    )
+    transport = DiscordTransport(WEBHOOK, options=opts)
+    client = AlertClient(transport)
+    cid = str(uuid.uuid4())
+    result = client.send(
+        Alert(
+            message=(
+                "Daily AR subledger is 0.18% off the GL control total for posting date. "
+                "Variance is within auto-accept band but flagged for finance review."
+            ),
+            severity=Severity.MEDIUM,
+            title="Reconciliation variance — review queue",
+            service="finance-ledger",
+            environment=os.environ.get("ENV", "production"),
+            correlation_id=cid,
+            run_id=f"recon-{uuid.uuid4().hex[:12]}",
+            dedupe_key="finance:daily-recon:gl-drift",
+        )
+    )
+    _assert_send_ok(result, label="embed identity")

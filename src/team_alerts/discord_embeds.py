@@ -18,7 +18,7 @@ from team_alerts.constants import (
     Severity,
 )
 from team_alerts.discord_options import AllowedMentionsOptions, DiscordTransportOptions, MetadataUrlLinkStyle
-from team_alerts.formatters import discord_relative_timestamp, format_severity_label
+from team_alerts.formatters import discord_relative_timestamp, format_severity_with_level_bar
 from team_alerts.models import Alert
 
 
@@ -85,10 +85,17 @@ def metadata_to_embed_fields(
 def _description_header_and_overflow(alert: Alert) -> tuple[str, str]:
     """First embed description segment (within API limit) and plain-text overflow."""
     lines: list[str] = []
+    lines.append(format_severity_with_level_bar(alert.severity))
     if alert.service:
         lines.append(f"**Service:** {alert.service}")
     if alert.environment:
         lines.append(f"**Environment:** {alert.environment}")
+    if alert.correlation_id:
+        lines.append(f"**correlation_id:** {_truncate(str(alert.correlation_id), 512)}")
+    if alert.run_id:
+        lines.append(f"**run_id:** {_truncate(str(alert.run_id), 512)}")
+    if alert.dedupe_key:
+        lines.append(f"**dedupe_key:** {_truncate(str(alert.dedupe_key), 512)}")
     if alert.occurred_at is not None:
         lines.append(f"**When:** {discord_relative_timestamp(alert.occurred_at)} (UTC)")
     header = "\n".join(lines).strip()
@@ -117,8 +124,8 @@ def build_alert_embed(
     Build a single Discord embed dict for ``alert`` plus plain-text overflow from
     the message body when it did not fit the embed description.
     """
-    title = alert.title or f"[{format_severity_label(alert.severity)}] {alert.service or 'Alert'}"
-    title = _truncate(title, 256)
+    raw_title = (alert.title or "").strip()
+    title = _truncate(raw_title if raw_title else "Alert", 256)
 
     desc, overflow = _description_header_and_overflow(alert)
 

@@ -19,6 +19,8 @@ from team_alerts.exceptions import ConfigurationError
 from team_alerts.models import Alert
 from team_alerts.transports.discord import DiscordTransport
 
+_PLAIN = DiscordTransportOptions(use_embeds=False)
+
 
 def test_discord_transport_rejects_empty_url() -> None:
     with pytest.raises(ConfigurationError):
@@ -44,10 +46,31 @@ def test_discord_transport_send_success() -> None:
     post.assert_called_once()
     kwargs = post.call_args.kwargs
     assert "json" in kwargs
-    content = kwargs["json"]["content"]
-    assert content
-    assert content.startswith(DEFAULT_ALERT_BANNER_LINE + "\n")
+    assert kwargs["json"]["embeds"]
+    desc = kwargs["json"]["embeds"][0]["description"]
+    assert "hello" in desc
+    assert "\u2588" in desc
     assert "timeout" in kwargs
+
+
+def test_discord_transport_plain_payload_style_overrides_default_embed() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
+        result = transport.send(
+            Alert(message="plain body", severity=Severity.HIGH, discord_payload_style="plain")
+        )
+
+    assert result.success is True
+    payload = post.call_args.kwargs["json"]
+    assert "embeds" not in payload or not payload.get("embeds")
+    assert payload["content"]
+    assert "plain body" in payload["content"]
+    assert "\u2588" in payload["content"]
 
 
 def test_discord_transport_send_http_error() -> None:
@@ -56,13 +79,15 @@ def test_discord_transport_send_http_error() -> None:
     mock_resp.status_code = 429
     mock_resp.text = "rate limited"
 
-    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp):
-        transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
-        result = transport.send(Alert(message="m", severity=Severity.HIGH))
+    with patch("team_alerts.transports.discord.time.sleep"):
+        with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+            transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=_PLAIN)
+            result = transport.send(Alert(message="m", severity=Severity.HIGH))
 
     assert result.success is False
     assert result.status_code == 429
     assert result.error_message == "HTTP 429"
+    assert post.call_count == 3
 
 
 def test_discord_transport_sends_multiple_chunks_for_long_alert() -> None:
@@ -75,7 +100,7 @@ def test_discord_transport_sends_multiple_chunks_for_long_alert() -> None:
     alert = Alert(message=huge, severity=Severity.LOW, title="long")
 
     with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
-        transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=_PLAIN)
         result = transport.send(alert)
 
     assert result.success is True
@@ -90,7 +115,7 @@ def test_discord_transport_includes_github_url_in_content() -> None:
 
     tests_dir = str(Path(__file__).resolve().parent)
     gh = GitHubLinkOptions(repository="org/repo", ref="deadbeef", source_root=tests_dir)
-    opts = DiscordTransportOptions(github=gh)
+    opts = DiscordTransportOptions(github=gh, use_embeds=False)
 
     try:
         raise RuntimeError("fail")
@@ -114,7 +139,7 @@ def test_discord_transport_long_exception_uses_multipart() -> None:
     mock_resp.status_code = 204
     mock_resp.text = ""
 
-    opts = DiscordTransportOptions(attach_exception_over_chars=50)
+    opts = DiscordTransportOptions(attach_exception_over_chars=50, use_embeds=False)
     alert = Alert(message="short", severity=Severity.HIGH, exception=ValueError("x"))
 
     with patch("team_alerts.transports.discord.format_exception", return_value="E" * 200) as fe:
@@ -139,28 +164,67 @@ def test_discord_transport_banner_disabled_when_blank_option() -> None:
     mock_resp.status_code = 204
     mock_resp.text = ""
 
-    opts = DiscordTransportOptions(alert_banner="")
+    opts = DiscordTransportOptions(alert_banner="", use_embeds=False)
     with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
         transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
         transport.send(Alert(message="m", severity=Severity.LOW))
 
     content = post.call_args.kwargs["json"]["content"]
     assert not content.startswith(DEFAULT_ALERT_BANNER_LINE)
-    assert content.startswith("**[LOW]**")
+    assert content.startswith("**LOW**")
 
 
 def test_discord_transport_request_exception() -> None:
-    with patch(
-        "team_alerts.transports.discord.requests.post",
-        side_effect=requests.Timeout("timed out"),
-    ):
-        transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
-        result = transport.send(Alert(message="m", severity=Severity.LOW))
+    with patch("team_alerts.transports.discord.time.sleep"):
+        with patch(
+            "team_alerts.transports.discord.requests.post",
+            side_effect=requests.Timeout("timed out"),
+        ) as post:
+            transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=_PLAIN)
+            result = transport.send(Alert(message="m", severity=Severity.LOW))
 
     assert result.success is False
     assert result.status_code is None
     assert result.error_message is not None
     assert "timed out" in result.error_message
+    assert post.call_count == 3
+
+
+def test_discord_transport_retries_until_success_after_429() -> None:
+    bad = MagicMock()
+    bad.ok = False
+    bad.status_code = 429
+    bad.text = "wait"
+    bad.headers = {"Retry-After": "0"}
+    good = MagicMock()
+    good.ok = True
+    good.status_code = 204
+    good.text = ""
+
+    with patch("team_alerts.transports.discord.time.sleep"):
+        with patch(
+            "team_alerts.transports.discord.requests.post",
+            side_effect=[bad, good],
+        ) as post:
+            transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=_PLAIN)
+            result = transport.send(Alert(message="m", severity=Severity.LOW))
+
+    assert result.success is True
+    assert post.call_count == 2
+
+
+def test_discord_transport_no_retry_on_400() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = False
+    mock_resp.status_code = 400
+    mock_resp.text = "bad"
+
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=_PLAIN)
+        result = transport.send(Alert(message="m", severity=Severity.LOW))
+
+    assert result.success is False
+    assert post.call_count == 1
 
 
 def test_discord_transport_embed_mode_posts_embed() -> None:
@@ -169,10 +233,16 @@ def test_discord_transport_embed_mode_posts_embed() -> None:
     mock_resp.status_code = 204
     mock_resp.text = ""
 
-    opts = DiscordTransportOptions(use_embeds=True)
     with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
-        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
-        result = transport.send(Alert(message="hello", severity=Severity.CRITICAL, title="T"))
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
+        result = transport.send(
+            Alert(
+                message="hello",
+                severity=Severity.CRITICAL,
+                title="T",
+                correlation_id="trace-99",
+            )
+        )
 
     assert result.success is True
     kwargs = post.call_args.kwargs
@@ -182,6 +252,8 @@ def test_discord_transport_embed_mode_posts_embed() -> None:
     assert embeds[0]["color"] == EMBED_COLOR_CRITICAL
     assert embeds[0]["title"] == "T"
     assert "hello" in embeds[0]["description"]
+    assert "trace-99" in embeds[0]["description"]
+    assert "\u2588" in embeds[0]["description"]
 
 
 def test_discord_transport_allowed_mentions_roles() -> None:
@@ -191,7 +263,7 @@ def test_discord_transport_allowed_mentions_roles() -> None:
     mock_resp.text = ""
 
     mentions = AllowedMentionsOptions(role_ids=("111", "222"))
-    opts = DiscordTransportOptions(allowed_mentions=mentions)
+    opts = DiscordTransportOptions(allowed_mentions=mentions, use_embeds=False)
 
     with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
         transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
@@ -209,7 +281,7 @@ def test_discord_transport_alert_footer_on_last_chunk() -> None:
     mock_resp.status_code = 204
     mock_resp.text = ""
 
-    opts = DiscordTransportOptions(alert_banner="", alert_footer="— end —")
+    opts = DiscordTransportOptions(alert_banner="", alert_footer="— end —", use_embeds=False)
     huge = "LINE\n" * 1500
     alert = Alert(message=huge, severity=Severity.LOW)
 
@@ -229,7 +301,7 @@ def test_discord_transport_embed_mode_multipart_with_embed() -> None:
     mock_resp.status_code = 204
     mock_resp.text = ""
 
-    opts = DiscordTransportOptions(use_embeds=True, attach_exception_over_chars=50)
+    opts = DiscordTransportOptions(attach_exception_over_chars=50)
     alert = Alert(message="short", severity=Severity.HIGH, exception=ValueError("x"))
 
     with patch("team_alerts.transports.discord.format_exception", return_value="E" * 200):
@@ -244,3 +316,54 @@ def test_discord_transport_embed_mode_multipart_with_embed() -> None:
     assert "embeds" in payload
     assert payload["embeds"][0]["color"] is not None
     assert "attachments" in payload
+    assert len(payload["attachments"]) == 1
+    assert payload["attachments"][0]["filename"] == "traceback.txt"
+    fields = payload["embeds"][0].get("fields") or []
+    assert not any(f.get("name") == "Exception" for f in fields)
+
+
+def test_discord_transport_embed_overflow_and_traceback_two_attachments() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    body = ("X" * 120 + "\n") * 400
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        err = exc
+
+    alert = Alert(message=body, severity=Severity.HIGH, title="T", exception=err, service="s", environment="e")
+
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
+        result = transport.send(alert)
+
+    assert result.success is True
+    payload = json.loads(post.call_args.kwargs["files"]["payload_json"][1])
+    names = [a["filename"] for a in payload["attachments"]]
+    assert names == ["message.txt", "traceback.txt"]
+
+
+def test_discord_transport_embed_overflow_message_as_attachment() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    body = ("Lorem line " * 500 + "\n") * 30
+    alert = Alert(message=body, severity=Severity.LOW, title="Bulk export", service="etl", environment="prod")
+
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
+        result = transport.send(alert)
+
+    assert result.success is True
+    post.assert_called_once()
+    files = post.call_args.kwargs["files"]
+    payload = json.loads(files["payload_json"][1])
+    assert payload["attachments"][0]["filename"] == "message.txt"
+    bio = files["files[0]"][1]
+    bio.seek(0)
+    assert b"Lorem line" in bio.read()

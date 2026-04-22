@@ -8,13 +8,16 @@ import pytest
 
 from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, DISCORD_CONTENT_MAX_CHARS, Severity
 from team_alerts.formatters import (
+    alert_has_identity_fields,
     append_footer_to_last_chunk,
+    apply_identity_markers_to_split_chunks,
     discord_relative_timestamp,
     format_alert_discord_chunks,
     format_alert_discord_text,
     format_exception,
     format_metadata_markdown,
     format_severity_label,
+    format_severity_with_level_bar,
     split_long_text,
     truncate_text,
 )
@@ -23,6 +26,13 @@ from team_alerts.models import Alert
 
 def test_format_severity_label() -> None:
     assert format_severity_label(Severity.HIGH) == "HIGH"
+
+
+def test_format_severity_with_level_bar_length_and_fill() -> None:
+    low = format_severity_with_level_bar(Severity.LOW)
+    crit = format_severity_with_level_bar(Severity.CRITICAL)
+    assert low.count("\u2588") < crit.count("\u2588")
+    assert "**LOW**" in low and "**CRITICAL**" in crit
 
 
 def test_format_metadata_markdown_empty() -> None:
@@ -77,7 +87,7 @@ def test_format_exception_includes_message_and_type() -> None:
 def test_format_alert_discord_text_no_banner_by_default() -> None:
     alert = Alert(message="x", severity=Severity.LOW)
     out = format_alert_discord_text(alert)
-    assert out.startswith("**[LOW]**")
+    assert out.startswith("**LOW**")
 
 
 def test_format_alert_discord_text_with_banner() -> None:
@@ -85,7 +95,7 @@ def test_format_alert_discord_text_with_banner() -> None:
     banner = "━━━━ prod alert ━━━━"
     out = format_alert_discord_text(alert, alert_banner=banner)
     assert out.startswith(banner + "\n")
-    assert "[LOW]" in out
+    assert "LOW" in out
     assert not out.startswith(banner + "\n\n")
 
 
@@ -107,10 +117,11 @@ def test_format_alert_discord_text_basic() -> None:
         metadata={"request_id": "abc"},
     )
     out = format_alert_discord_text(alert)
-    assert "[LOW]" in out
+    assert "LOW" in out
     assert "Something happened" in out
     assert "Job failed" in out
-    assert "worker" in out and "prod" in out
+    assert "**Service:**" in out and "worker" in out
+    assert "**Environment:**" in out and "prod" in out
     assert "request_id" in out
 
 
@@ -194,6 +205,34 @@ def test_append_footer_to_last_chunk_appends() -> None:
     chunks = ["a", "b"]
     out = append_footer_to_last_chunk(chunks, "footer")
     assert out == ["a", "b\nfooter"]
+
+
+def test_alert_has_identity_fields() -> None:
+    assert alert_has_identity_fields(Alert(message="x", severity=Severity.LOW, correlation_id="c")) is True
+    assert alert_has_identity_fields(Alert(message="x", severity=Severity.LOW)) is False
+
+
+def test_format_alert_discord_chunks_continuation_has_identity_marker() -> None:
+    msg = "Z" * 3000
+    alert = Alert(message=msg, severity=Severity.HIGH, correlation_id="corr-1", run_id="run-9")
+    chunks = format_alert_discord_chunks(alert, chunk_size=400, alert_banner="")
+    assert len(chunks) >= 2
+    assert "**correlation_id:**" in chunks[0]
+    assert "corr-1" in chunks[0]
+    assert chunks[1].startswith("**[2/")
+    assert "corr-1" in chunks[1] and "run-9" in chunks[1]
+
+
+def test_apply_identity_markers_all_chunks_when_not_in_leading() -> None:
+    alert = Alert(message="x", severity=Severity.LOW, dedupe_key="d1")
+    chunks = apply_identity_markers_to_split_chunks(
+        ["part-a", "part-b"],
+        alert,
+        leading_chunk_includes_identity=False,
+    )
+    assert chunks[0].startswith("**[1/2]**")
+    assert "dedupe_key" in chunks[0]
+    assert chunks[1].startswith("**[2/2]**")
 
 
 def test_append_footer_to_last_chunk_new_chunk_when_full() -> None:

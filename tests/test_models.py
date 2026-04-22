@@ -26,6 +26,19 @@ def test_alert_metadata_is_isolated_per_instance() -> None:
     assert b.metadata == {}
 
 
+def test_alert_identity_fields() -> None:
+    alert = Alert(
+        message="m",
+        severity=Severity.HIGH,
+        correlation_id="c-1",
+        run_id="r-2",
+        dedupe_key="d-3",
+    )
+    assert alert.correlation_id == "c-1"
+    assert alert.run_id == "r-2"
+    assert alert.dedupe_key == "d-3"
+
+
 def test_alert_with_optional_fields() -> None:
     err = ValueError("boom")
     alert = Alert(

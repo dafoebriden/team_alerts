@@ -40,6 +40,23 @@ def test_from_env_alert_banner_custom(monkeypatch: pytest.MonkeyPatch) -> None:
     assert DiscordTransportOptions.from_env().alert_banner == "~~~ staging ~~~"
 
 
+def test_from_env_use_embeds_defaults_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TEAM_ALERTS_USE_EMBEDS", raising=False)
+    assert DiscordTransportOptions.from_env().use_embeds is True
+
+
+def test_from_env_use_embeds_plain_disables(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_USE_EMBEDS", "plain")
+    assert DiscordTransportOptions.from_env().use_embeds is False
+
+
+def test_from_env_webhook_max_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "1")
+    assert DiscordTransportOptions.from_env().webhook_max_attempts == 1
+    monkeypatch.setenv("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "7")
+    assert DiscordTransportOptions.from_env().webhook_max_attempts == 7
+
+
 def test_from_env_metadata_url_link_style(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEAM_ALERTS_METADATA_URL_STYLE", "markdown")
     assert DiscordTransportOptions.from_env().metadata_url_link_style == "markdown"
