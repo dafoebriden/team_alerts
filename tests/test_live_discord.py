@@ -1,6 +1,11 @@
 """
 Live integration tests against a real Discord webhook.
 
+Default transport uses **embed mode**: short ``Alert.message`` text is inlined in the
+embed description; long bodies use ``message.txt``. Short tracebacks use an
+``Exception`` embed field; long ones use ``traceback.txt`` on the same multipart
+post when needed. No multi-chunk ``content`` chains for overflow.
+
 Set ``RUN_LIVE_DISCORD_TESTS=1`` and ``DISCORD_WEBHOOK`` to enable, or define
 them in ``.env.local`` at the repo root (loaded automatically by ``conftest.py``).
 """
@@ -38,7 +43,7 @@ def _assert_send_ok(result, *, label: str) -> None:
 
 
 def test_live_plain_operational_ping() -> None:
-    """Low-severity notice on the default transport (rich embed, not plain text)."""
+    """Low-severity default transport: embed with short narrative inlined (JSON webhook)."""
     client = AlertClient.from_discord_webhook_env()
     result = client.low(
         "Nightly eligibility export finished within SLA; no operator action required.",
@@ -51,7 +56,7 @@ def test_live_plain_operational_ping() -> None:
 
 
 def test_live_explicit_plain_text_payload() -> None:
-    """One alert forced to classic ``content`` layout (validates ``discord_payload_style='plain'``)."""
+    """Short body: classic ``content`` only (``discord_payload_style='plain'``)."""
     client = AlertClient.from_discord_webhook_env()
     result = client.send(
         Alert(
@@ -66,8 +71,27 @@ def test_live_explicit_plain_text_payload() -> None:
     _assert_send_ok(result, label="plain canary")
 
 
+def test_live_plain_long_body_single_multipart_file() -> None:
+    """Plain mode over 2000 chars: one webhook with ``message.txt`` (no follow-up chunks)."""
+    client = AlertClient.from_discord_webhook_env()
+    lines = [f"[{i:04d}] indexer shard=replica-B bytes_out={8000 + i}" for i in range(350)]
+    body = "Log excerpt (plain transport):\n" + "\n".join(lines)
+    result = client.send(
+        Alert(
+            message=body,
+            severity=Severity.HIGH,
+            title="Indexer saturation snapshot",
+            service="search-indexer",
+            environment=os.environ.get("ENV", "staging"),
+            discord_payload_style="plain",
+            run_id=f"plain-long-{uuid.uuid4().hex[:10]}",
+        )
+    )
+    _assert_send_ok(result, label="plain long multipart")
+
+
 def test_live_upstream_dependency_failure() -> None:
-    """Typical API / dependency outage: HIGH with structured metadata."""
+    """HIGH outage: embed with metadata fields and narrative inlined in the description."""
     client = AlertClient.from_discord_webhook_env()
     cid = str(uuid.uuid4())
     alert = Alert(
@@ -93,7 +117,7 @@ def test_live_upstream_dependency_failure() -> None:
 
 
 def test_live_handler_exception_with_traceback() -> None:
-    """Critical failure: embed summary plus full traceback as ``traceback.txt`` on the same post."""
+    """Critical failure: embed with narrative + ``Exception`` field for a typical short stack."""
 
     def _inner_parse_payload(raw: dict) -> str:
         if "submission_id" not in raw:
@@ -131,7 +155,7 @@ def test_live_handler_exception_with_traceback() -> None:
 
 
 def test_live_long_log_tail_style_message() -> None:
-    """Long body exceeds embed description; overflow should arrive as ``message.txt`` on the same webhook."""
+    """Long log body: full text in ``message.txt``; embed description is headers + pointer + metadata fields."""
     lines = [f"[{i:04d}] worker=pool-A status=ok latency_ms={20 + (i % 17)}" for i in range(120)]
     body = "Last 120 lines from campaign-worker (rolling window):\n" + "\n".join(lines)
     client = AlertClient.from_discord_webhook_env()
@@ -151,8 +175,9 @@ def test_live_long_log_tail_style_message() -> None:
 
 def test_live_traceback_as_file_attachment() -> None:
     """
-    Deep stack: embed with summary + ``stacktrace.txt`` in the same multipart message
-    (embed mode always attaches tracebacks; filename overridden here).
+    Deep stack: short narrative stays in the embed description; formatted traceback
+    exceeds one ``Exception`` field so it is ``stacktrace.txt`` (custom filename) on
+    the same multipart post as the embed.
     """
 
     def _deep_stack() -> None:
@@ -185,7 +210,7 @@ def test_live_traceback_as_file_attachment() -> None:
     transport = DiscordTransport(WEBHOOK, options=opts)
     client = AlertClient(transport)
     alert = Alert(
-        message="Settlement file pull failed after repeated vendor timeouts. Full stack is in the attachment.",
+        message="Settlement file pull failed after repeated vendor timeouts. Stack trace is attached as stacktrace.txt.",
         severity=Severity.CRITICAL,
         title="Vendor integration timeout",
         exception=exc,
@@ -209,7 +234,7 @@ def test_live_traceback_as_file_attachment() -> None:
     reason="Set GITHUB_REPOSITORY and GITHUB_SHA (or GIT_COMMIT / GITHUB_REF_NAME) for GitHub link live test.",
 )
 def test_live_github_metadata_when_ci_env_present() -> None:
-    """If CI-style env vars exist, GitHub URL should appear in embed metadata alongside traceback file."""
+    """CI env: GitHub URL in embed fields; short narrative and typical traceback inlined in the embed when they fit."""
     opts = DiscordTransportOptions.from_env()
     if opts.github is None or not opts.github.source_root:
         pytest.skip("DiscordTransportOptions.from_env() did not yield github + source_root")
@@ -223,7 +248,7 @@ def test_live_github_metadata_when_ci_env_present() -> None:
     client = AlertClient(transport)
     result = client.send(
         Alert(
-            message="Deploy gate failed during artifact verification; see traceback for frame and repo link.",
+            message="Deploy gate failed during artifact verification. Traceback file shows the frame; GitHub link is in metadata.",
             severity=Severity.HIGH,
             title="Build verification failed",
             exception=pass_exc,
@@ -237,10 +262,7 @@ def test_live_github_metadata_when_ci_env_present() -> None:
 
 
 def test_live_embed_mode_with_model_identity_fields() -> None:
-    """
-    Rich embed plus ``Alert.correlation_id`` / ``run_id`` / ``dedupe_key`` in the
-    embed description (validates recent embed + identity formatting).
-    """
+    """Identity fields and reconciliation note inlined in the embed description (JSON post)."""
     base_opts = DiscordTransportOptions.from_env()
     opts = replace(
         base_opts,

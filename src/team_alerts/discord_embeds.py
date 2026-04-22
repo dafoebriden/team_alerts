@@ -22,6 +22,17 @@ from team_alerts.formatters import discord_relative_timestamp, format_severity_w
 from team_alerts.models import Alert
 
 
+def traceback_fits_single_exception_field(traceback_text: str) -> bool:
+    """
+    Return True if ``traceback_text`` can be sent in one embed field wrapped as
+    `` ```…``` `` without exceeding Discord's field value limit.
+    """
+    if not traceback_text:
+        return True
+    wrapped = f"```{traceback_text}```"
+    return len(wrapped) <= DISCORD_EMBED_FIELD_VALUE_MAX
+
+
 def severity_embed_color(severity: Severity) -> int:
     """Discord embed ``color`` (left sidebar) by severity."""
     return {
@@ -82,8 +93,8 @@ def metadata_to_embed_fields(
     return fields
 
 
-def _description_header_and_overflow(alert: Alert) -> tuple[str, str]:
-    """First embed description segment (within API limit) and plain-text overflow."""
+def _embed_header_block(alert: Alert) -> str:
+    """Severity bar, service, env, identity lines, and when — no ``Alert.message`` body."""
     lines: list[str] = []
     lines.append(format_severity_with_level_bar(alert.severity))
     if alert.service:
@@ -98,19 +109,30 @@ def _description_header_and_overflow(alert: Alert) -> tuple[str, str]:
         lines.append(f"**dedupe_key:** {_truncate(str(alert.dedupe_key), 512)}")
     if alert.occurred_at is not None:
         lines.append(f"**When:** {discord_relative_timestamp(alert.occurred_at)} (UTC)")
-    header = "\n".join(lines).strip()
-    joiner = "\n\n" if header else ""
-    prefix_len = len(header) + len(joiner)
-    budget = DISCORD_EMBED_DESCRIPTION_MAX - prefix_len
-    if budget < 1:
-        budget = 1
-    msg = alert.message
-    head = msg[:budget]
-    overflow = msg[budget:]
-    desc = (header + joiner + head).strip()
-    if len(desc) > DISCORD_EMBED_DESCRIPTION_MAX:
-        desc = desc[:DISCORD_EMBED_DESCRIPTION_MAX]
-    return desc, overflow
+    return "\n".join(lines).strip()
+
+
+def _description_header_and_overflow(alert: Alert) -> tuple[str, str]:
+    """
+    Embed description and optional plain-text overflow for ``message.txt``.
+
+    The message is inlined when ``header + message`` fits in the embed description
+    limit; otherwise the description points to an attachment with the full body.
+    """
+    header = _embed_header_block(alert)
+    raw_msg = alert.message or ""
+    if not raw_msg.strip():
+        desc = header
+        if len(desc) > DISCORD_EMBED_DESCRIPTION_MAX:
+            desc = desc[:DISCORD_EMBED_DESCRIPTION_MAX]
+        return desc, ""
+    inline = f"{header}\n\n{raw_msg}".strip()
+    if len(inline) <= DISCORD_EMBED_DESCRIPTION_MAX:
+        return inline, ""
+    note = f"{header}\n\n*(Full message in attachment.)*".strip()
+    if len(note) > DISCORD_EMBED_DESCRIPTION_MAX:
+        note = note[:DISCORD_EMBED_DESCRIPTION_MAX]
+    return note, raw_msg
 
 
 def build_alert_embed(
@@ -173,8 +195,60 @@ def build_alert_embed(
             dt = dt.replace(tzinfo=timezone.utc)
         embed["timestamp"] = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    embed, overflow_patch = _fit_embed_under_total_cap(embed, overflow == "", alert)
+    if overflow_patch is not None:
+        overflow = overflow_patch
     embed = _shrink_embed_until_under_cap(embed)
     return embed, overflow
+
+
+def _fit_embed_under_total_cap(
+    embed: dict[str, Any],
+    message_is_inlined: bool,
+    alert: Alert,
+) -> tuple[dict[str, Any], str | None]:
+    """
+    If the message is inlined but the embed JSON still exceeds Discord's total cap
+    (e.g. many metadata fields or a long footer), move the body to overflow
+    (``message.txt``) and shorten the description.
+
+    Returns ``(embed, None)`` when unchanged, or ``(embed, full_message)`` when the
+    caller must attach the message body.
+    """
+    if not message_is_inlined:
+        return embed, None
+
+    def size() -> int:
+        return embed_json_size_estimate(embed)
+
+    while size() > DISCORD_EMBED_TOTAL_MAX and embed.get("fields"):
+        if not _pop_one_non_exception_field(embed):
+            break
+
+    if size() <= DISCORD_EMBED_TOTAL_MAX:
+        return embed, None
+
+    header = _embed_header_block(alert)
+    note = f"{header}\n\n*(Full message in attachment.)*".strip()
+    if len(note) > DISCORD_EMBED_DESCRIPTION_MAX:
+        note = note[:DISCORD_EMBED_DESCRIPTION_MAX]
+    embed["description"] = note
+    while size() > DISCORD_EMBED_TOTAL_MAX and embed.get("fields"):
+        if not _pop_one_non_exception_field(embed):
+            break
+    return embed, (alert.message or "")
+
+
+def _pop_one_non_exception_field(embed: dict[str, Any]) -> bool:
+    fields = embed.get("fields")
+    if not fields:
+        return False
+    for i in range(len(fields) - 1, -1, -1):
+        if fields[i].get("name") != "Exception":
+            embed["fields"] = fields[:i] + fields[i + 1 :]
+            return True
+    embed["fields"] = fields[:-1]
+    return True
 
 
 def _shrink_embed_until_under_cap(embed: dict[str, Any]) -> dict[str, Any]:

@@ -82,8 +82,13 @@ class DiscordTransportOptions:
 
     attach_exception_over_chars: int | None = None
     """
-    When not ``None`` and the formatted traceback exceeds this length, the traceback
-    is sent as a file attachment instead of inline code (first webhook only).
+    When not ``None`` and the formatted traceback exceeds this length (character
+    count), the traceback is sent as a file attachment instead of inline content.
+
+    In **plain** mode this gates ``traceback.txt`` vs inline text in the body. In
+    **embed** mode the same threshold applies vs an ``Exception`` embed field; if
+    the traceback cannot fit in one field (Discord’s fenced value limit), a file is
+    used even when this is ``None``.
     """
 
     exception_attachment_filename: str = "traceback.txt"

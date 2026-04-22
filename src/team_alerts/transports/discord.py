@@ -12,8 +12,16 @@ from typing import Any
 import requests
 from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
 
-from team_alerts.constants import DEFAULT_ALERT_BANNER_LINE, DEFAULT_CHUNK_SIZE, DISCORD_REQUEST_TIMEOUT
-from team_alerts.discord_embeds import allowed_mentions_payload, build_alert_embed
+from team_alerts.constants import (
+    DEFAULT_ALERT_BANNER_LINE,
+    DISCORD_CONTENT_MAX_CHARS,
+    DISCORD_REQUEST_TIMEOUT,
+)
+from team_alerts.discord_embeds import (
+    allowed_mentions_payload,
+    build_alert_embed,
+    traceback_fits_single_exception_field,
+)
 from team_alerts.discord_options import DiscordTransportOptions, GitHubLinkOptions
 from team_alerts.exceptions import ConfigurationError
 from team_alerts.formatters import (
@@ -77,32 +85,31 @@ class DiscordTransport(BaseTransport):
         )
 
         if _use_embeds_effective(self._options, prepared):
-            return self._send_embed_mode(prepared, tb_text, use_file, mentions)
+            return self._send_embed_mode(prepared, tb_text, mentions)
 
         if use_file:
-            chunks = format_alert_discord_chunks(
-                prepared,
-                include_exception_in_body=False,
-                exception_attachment_filename=self._options.exception_attachment_filename,
-                metadata_url_link_style=self._options.metadata_url_link_style,
-                alert_banner=_alert_banner_line(self._options),
+            chunks = list(
+                format_alert_discord_chunks(
+                    prepared,
+                    include_exception_in_body=False,
+                    exception_attachment_filename=self._options.exception_attachment_filename,
+                    metadata_url_link_style=self._options.metadata_url_link_style,
+                    alert_banner=_alert_banner_line(self._options),
+                )
             )
             chunks = append_footer_to_last_chunk(chunks, self._options.alert_footer)
+            full_plain = "\n".join(chunks)
             tb_bytes = _traceback_attachment_bytes(tb_text, self._options.max_attachment_bytes)
-            first, rest = chunks[0], chunks[1:]
-            last = self._post_multipart(
-                content=first,
-                file_bytes=tb_bytes,
-                filename=self._options.exception_attachment_filename,
+            body_bytes = _traceback_attachment_bytes(full_plain, self._options.max_attachment_bytes)
+            return self._post_multipart_files(
+                content="*(Traceback and full alert are attached.)*",
+                embeds=None,
+                files=[
+                    (self._options.exception_attachment_filename, tb_bytes, "Python traceback"),
+                    (self._options.message_attachment_filename, body_bytes, "Full alert text"),
+                ],
                 mentions=mentions,
             )
-            if not last.success:
-                return last
-            for content in rest:
-                last = self._post_payload({"content": content}, mentions=mentions)
-                if not last.success:
-                    return last
-            return last
 
         chunks = list(
             format_alert_discord_chunks(
@@ -112,37 +119,44 @@ class DiscordTransport(BaseTransport):
             )
         )
         chunks = append_footer_to_last_chunk(chunks, self._options.alert_footer)
-
-        last: SendResult | None = None
-        for content in chunks:
-            last = self._post_payload({"content": content}, mentions=mentions)
-            if not last.success:
-                return last
-        return last or SendResult(success=True, status_code=None, response_text="", error_message=None)
+        full_plain = "\n".join(chunks)
+        if len(full_plain) <= DISCORD_CONTENT_MAX_CHARS:
+            return self._post_payload({"content": full_plain}, mentions=mentions)
+        return self._post_multipart_files(
+            content="*(Full alert attached.)*",
+            embeds=None,
+            files=[
+                (
+                    self._options.message_attachment_filename,
+                    _traceback_attachment_bytes(full_plain, self._options.max_attachment_bytes),
+                    "Full alert text",
+                )
+            ],
+            mentions=mentions,
+        )
 
     def _send_embed_mode(
         self,
         alert: Alert,
         tb_text: str,
-        use_file: bool,
         mentions: dict[str, Any] | None,
     ) -> SendResult:
-        _ = use_file
+        threshold = self._options.attach_exception_over_chars
+        use_tb_file = _embed_traceback_as_file(tb_text, threshold)
         embed, overflow = build_alert_embed(
             alert,
             options=self._options,
-            include_exception_in_body=False,
-            exception_text=None,
+            include_exception_in_body=bool(tb_text) and not use_tb_file,
+            exception_text=tb_text if not use_tb_file else None,
         )
 
         footer = (self._options.alert_footer or "").strip()
         overflow_text = overflow.strip()
-        has_tb = bool(tb_text)
         files: list[tuple[str, bytes, str]] = []
 
         if overflow_text:
             body = overflow_text
-            if footer and not has_tb:
+            if footer and not use_tb_file:
                 body = f"{body}\n\n{footer}"
             files.append(
                 (
@@ -151,7 +165,7 @@ class DiscordTransport(BaseTransport):
                     "Full message text",
                 )
             )
-        if has_tb:
+        if use_tb_file:
             tb_body = tb_text
             if footer:
                 tb_body = f"{tb_text}\n\n{footer}"
@@ -233,17 +247,17 @@ class DiscordTransport(BaseTransport):
         files: list[tuple[str, bytes, str]],
         mentions: dict[str, Any] | None,
     ) -> SendResult:
-        payload: dict[str, Any] = {}
-        if content:
-            payload["content"] = content
-        if embeds is not None:
-            payload["embeds"] = embeds
         attachments: list[dict[str, Any]] = []
         multipart: dict[str, Any] = {}
         for i, (filename, file_bytes, description) in enumerate(files):
             desc = description if len(description) <= 100 else description[:99] + "…"
             attachments.append({"id": i, "filename": filename, "description": desc})
             multipart[f"files[{i}]"] = (filename, BytesIO(file_bytes), "text/plain; charset=utf-8")
+        payload: dict[str, Any] = {}
+        if content:
+            payload["content"] = content
+        if embeds is not None:
+            payload["embeds"] = embeds
         payload["attachments"] = attachments
         payload = _merge_mentions(payload, mentions)
         opts = self._options
@@ -319,8 +333,17 @@ class DiscordTransport(BaseTransport):
         )
 
 
+def _embed_traceback_as_file(tb_text: str, attach_exception_over_chars: int | None) -> bool:
+    if not tb_text:
+        return False
+    if attach_exception_over_chars is not None and len(tb_text) > attach_exception_over_chars:
+        return True
+    return not traceback_fits_single_exception_field(tb_text)
+
+
 def _embed_json_payload(embed: dict[str, Any], footer: str | None) -> dict[str, Any]:
-    out: dict[str, Any] = {"embeds": [embed]}
+    out: dict[str, Any] = {}
+    out["embeds"] = [embed]
     if footer:
         out["content"] = footer
     return out

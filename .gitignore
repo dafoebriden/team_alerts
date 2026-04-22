@@ -19,6 +19,7 @@ wheels/
 .installed.cfg
 *.egg
 .venv/
+.tmp-venv/
 venv/
 .env
 .env.local

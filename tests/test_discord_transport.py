@@ -17,9 +17,15 @@ from team_alerts.discord_options import (
 )
 from team_alerts.exceptions import ConfigurationError
 from team_alerts.models import Alert
+from team_alerts.discord_embeds import traceback_fits_single_exception_field
 from team_alerts.transports.discord import DiscordTransport
 
 _PLAIN = DiscordTransportOptions(use_embeds=False)
+
+
+def test_traceback_fits_single_exception_field_boundary() -> None:
+    assert traceback_fits_single_exception_field("x" * 1018)
+    assert not traceback_fits_single_exception_field("x" * 1019)
 
 
 def test_discord_transport_rejects_empty_url() -> None:
@@ -46,10 +52,12 @@ def test_discord_transport_send_success() -> None:
     post.assert_called_once()
     kwargs = post.call_args.kwargs
     assert "json" in kwargs
-    assert kwargs["json"]["embeds"]
-    desc = kwargs["json"]["embeds"][0]["description"]
+    payload = kwargs["json"]
+    assert payload["embeds"]
+    desc = payload["embeds"][0]["description"]
     assert "hello" in desc
     assert "\u2588" in desc
+    assert "files" not in kwargs
     assert "timeout" in kwargs
 
 
@@ -90,7 +98,7 @@ def test_discord_transport_send_http_error() -> None:
     assert post.call_count == 3
 
 
-def test_discord_transport_sends_multiple_chunks_for_long_alert() -> None:
+def test_discord_transport_long_plain_alert_single_multipart_file() -> None:
     mock_resp = MagicMock()
     mock_resp.ok = True
     mock_resp.status_code = 204
@@ -104,7 +112,10 @@ def test_discord_transport_sends_multiple_chunks_for_long_alert() -> None:
         result = transport.send(alert)
 
     assert result.success is True
-    assert post.call_count >= 2
+    post.assert_called_once()
+    assert "files" in post.call_args.kwargs
+    payload = json.loads(post.call_args.kwargs["files"]["payload_json"][1])
+    assert len(payload["attachments"]) == 1
 
 
 def test_discord_transport_includes_github_url_in_content() -> None:
@@ -247,7 +258,8 @@ def test_discord_transport_embed_mode_posts_embed() -> None:
     assert result.success is True
     kwargs = post.call_args.kwargs
     assert "json" in kwargs
-    embeds = kwargs["json"]["embeds"]
+    payload = kwargs["json"]
+    embeds = payload["embeds"]
     assert len(embeds) == 1
     assert embeds[0]["color"] == EMBED_COLOR_CRITICAL
     assert embeds[0]["title"] == "T"
@@ -290,9 +302,10 @@ def test_discord_transport_alert_footer_on_last_chunk() -> None:
         result = transport.send(alert)
 
     assert result.success is True
-    assert post.call_count >= 2
-    last = post.call_args_list[-1].kwargs["json"]["content"]
-    assert last.rstrip().endswith("— end —")
+    post.assert_called_once()
+    bio = post.call_args.kwargs["files"]["files[0]"][1]
+    bio.seek(0)
+    assert bio.read().decode("utf-8").rstrip().endswith("— end —")
 
 
 def test_discord_transport_embed_mode_multipart_with_embed() -> None:
@@ -317,12 +330,39 @@ def test_discord_transport_embed_mode_multipart_with_embed() -> None:
     assert payload["embeds"][0]["color"] is not None
     assert "attachments" in payload
     assert len(payload["attachments"]) == 1
-    assert payload["attachments"][0]["filename"] == "traceback.txt"
+    assert [a["filename"] for a in payload["attachments"]] == ["traceback.txt"]
+    assert "short" in payload["embeds"][0].get("description", "")
     fields = payload["embeds"][0].get("fields") or []
     assert not any(f.get("name") == "Exception" for f in fields)
 
 
 def test_discord_transport_embed_overflow_and_traceback_two_attachments() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    body = ("X" * 120 + "\n") * 400
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        err = exc
+
+    alert = Alert(message=body, severity=Severity.HIGH, title="T", exception=err, service="s", environment="e")
+    long_tb = ("Z" * 100 + "\n") * 20
+
+    with patch("team_alerts.transports.discord.format_exception", return_value=long_tb):
+        with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+            transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
+            result = transport.send(alert)
+
+    assert result.success is True
+    payload = json.loads(post.call_args.kwargs["files"]["payload_json"][1])
+    names = [a["filename"] for a in payload["attachments"]]
+    assert names == ["message.txt", "traceback.txt"]
+
+
+def test_discord_transport_embed_overflow_long_message_short_traceback_one_file() -> None:
     mock_resp = MagicMock()
     mock_resp.ok = True
     mock_resp.status_code = 204
@@ -342,8 +382,31 @@ def test_discord_transport_embed_overflow_and_traceback_two_attachments() -> Non
 
     assert result.success is True
     payload = json.loads(post.call_args.kwargs["files"]["payload_json"][1])
-    names = [a["filename"] for a in payload["attachments"]]
-    assert names == ["message.txt", "traceback.txt"]
+    assert [a["filename"] for a in payload["attachments"]] == ["message.txt"]
+    fields = payload["embeds"][0].get("fields") or []
+    assert any(f.get("name") == "Exception" for f in fields)
+
+
+def test_discord_transport_embed_short_traceback_json_exception_field() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    alert = Alert(message="ok", severity=Severity.HIGH, exception=ValueError("x"))
+
+    with patch("team_alerts.transports.discord.format_exception", return_value="ValueError: x\n  short"):
+        with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+            transport = DiscordTransport("https://discord.com/api/webhooks/x/y")
+            result = transport.send(alert)
+
+    assert result.success is True
+    assert "json" in post.call_args.kwargs
+    payload = post.call_args.kwargs["json"]
+    fields = payload["embeds"][0].get("fields") or []
+    exc_f = next(f for f in fields if f.get("name") == "Exception")
+    assert "ValueError" in exc_f["value"]
+    assert "files" not in post.call_args.kwargs
 
 
 def test_discord_transport_embed_overflow_message_as_attachment() -> None:
