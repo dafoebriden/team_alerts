@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any
+
 import pytest
 
 from team_alerts.discord_options import DiscordTransportOptions
+
+
+def _merge_like_discord_transport(
+    *,
+    options: DiscordTransportOptions | None = None,
+    **kwargs: Any,
+) -> DiscordTransportOptions:
+    out = DiscordTransportOptions.from_env()
+    if options is not None:
+        out = replace(out, **options.nondefault_option_overrides())
+    if kwargs:
+        out = replace(out, **kwargs)
+    return out
 
 
 def test_from_env_github_and_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,3 +80,58 @@ def test_from_env_metadata_url_link_style(monkeypatch: pytest.MonkeyPatch) -> No
     assert DiscordTransportOptions.from_env().metadata_url_link_style == "markdown"
     monkeypatch.setenv("TEAM_ALERTS_METADATA_URL_STYLE", "angle")
     assert DiscordTransportOptions.from_env().metadata_url_link_style == "angle"
+
+
+def test_nondefault_option_overrides_only_differs_from_defaults() -> None:
+    opts = DiscordTransportOptions(use_embeds=False, webhook_max_attempts=5)
+    keys = set(opts.nondefault_option_overrides())
+    assert "use_embeds" in keys
+    assert "webhook_max_attempts" in keys
+    assert "github" not in keys
+
+
+def test_merge_env_only_when_no_explicit_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "org/repo")
+    monkeypatch.setenv("GITHUB_SHA", "abc")
+    monkeypatch.setenv("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "9")
+    merged = _merge_like_discord_transport()
+    assert merged.github is not None
+    assert merged.github.repository == "org/repo"
+    assert merged.webhook_max_attempts == 9
+
+
+def test_merge_explicit_options_patch_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_USE_EMBEDS", "1")
+    monkeypatch.setenv("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "9")
+    merged = _merge_like_discord_transport(
+        options=DiscordTransportOptions(use_embeds=False, webhook_max_attempts=2),
+    )
+    assert merged.use_embeds is False
+    assert merged.webhook_max_attempts == 2
+
+
+def test_merge_env_keeps_field_when_options_matches_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "9")
+    merged = _merge_like_discord_transport(options=DiscordTransportOptions(webhook_max_attempts=3))
+    assert merged.webhook_max_attempts == 9
+
+
+def test_merge_env_keeps_field_when_options_value_equals_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_USE_EMBEDS", "plain")
+    merged = _merge_like_discord_transport(options=DiscordTransportOptions(use_embeds=True))
+    assert merged.use_embeds is False
+
+
+def test_merge_kwargs_override_env_even_when_options_matches_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_USE_EMBEDS", "plain")
+    merged = _merge_like_discord_transport(
+        options=DiscordTransportOptions(use_embeds=True),
+        use_embeds=True,
+    )
+    assert merged.use_embeds is True

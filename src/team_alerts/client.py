@@ -26,20 +26,26 @@ class AlertClient:
         env_var: str = "DISCORD_WEBHOOK",
         *,
         discord_options: DiscordTransportOptions | None = None,
+        **discord_option_overrides: Any,
     ) -> AlertClient:
         """
         Build a client using ``DiscordTransport`` from ``os.environ[env_var]``.
 
-        Pass ``discord_options`` for GitHub links, traceback file uploads, static
-        links, or ``DiscordTransportOptions.from_env()`` to read common settings
-        from the environment.
+        Options are resolved inside ``DiscordTransport`` (env base, then
+        ``discord_options``, then keyword overrides).
         """
         url = os.environ.get(env_var, "").strip()
         if not url:
             raise ConfigurationError(
                 f"Environment variable {env_var!r} is not set or is empty; cannot create Discord transport."
             )
-        return cls(DiscordTransport(url, options=discord_options))
+        return cls(
+            DiscordTransport(
+                url,
+                options=discord_options,
+                **discord_option_overrides,
+            )
+        )
 
     def send(self, alert: Alert) -> SendResult:
         """Send a fully constructed alert."""

@@ -35,6 +35,26 @@ def test_discord_transport_rejects_empty_url() -> None:
         DiscordTransport("   ")
 
 
+def test_discord_transport_keyword_overrides_merge_into_options() -> None:
+    base = DiscordTransportOptions(use_embeds=True, webhook_max_attempts=3)
+    transport = DiscordTransport(
+        "https://discord.com/api/webhooks/x/y",
+        options=base,
+        use_embeds=False,
+        webhook_max_attempts=7,
+    )
+    assert transport.options.use_embeds is False
+    assert transport.options.webhook_max_attempts == 7
+
+
+def test_discord_transport_keyword_overrides_without_base_options() -> None:
+    transport = DiscordTransport(
+        "https://discord.com/api/webhooks/x/y",
+        use_embeds=False,
+    )
+    assert transport.options.use_embeds is False
+
+
 def test_discord_transport_send_success() -> None:
     mock_resp = MagicMock()
     mock_resp.ok = True

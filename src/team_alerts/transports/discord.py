@@ -47,19 +47,30 @@ def _use_embeds_effective(options: DiscordTransportOptions, alert: Alert) -> boo
 
 
 class DiscordTransport(BaseTransport):
-    """Send alerts to Discord using an incoming webhook URL."""
+    """
+    Send alerts to Discord using an incoming webhook URL.
+
+    Baseline from :meth:`~team_alerts.discord_options.DiscordTransportOptions.from_env`,
+    then non-default fields from ``options`` (if given), then keyword arguments.
+    """
 
     def __init__(
         self,
         webhook_url: str,
         *,
         options: DiscordTransportOptions | None = None,
+        **option_overrides: Any,
     ) -> None:
         stripped = (webhook_url or "").strip()
         if not stripped:
             raise ConfigurationError("Discord webhook URL is missing or empty.")
         self._webhook_url = stripped
-        self._options = options or DiscordTransportOptions()
+        merged = DiscordTransportOptions.from_env()
+        if options is not None:
+            merged = replace(merged, **options.nondefault_option_overrides())
+        if option_overrides:
+            merged = replace(merged, **option_overrides)
+        self._options = merged
 
     @property
     def webhook_url(self) -> str:

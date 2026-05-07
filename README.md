@@ -9,7 +9,7 @@ Source repository: [github.com/dafoebriden/team_alerts](https://github.com/dafoe
 - **`Alert`** model with severity, optional title, exception, metadata, service, environment, optional **`occurred_at`** (UTC instant for Discord timestamps), optional **`correlation_id`**, **`run_id`**, **`dedupe_key`**, and per-send **`discord_payload_style`** (`"auto"` / `"embed"` / `"plain"`) to override Discord layout
 - **Pure formatters** for Discord-safe text (truncation and splitting for long payloads), **`discord_relative_timestamp()`** for `<t:unix:R>` strings
 - **`DiscordTransport`** using `requests` (`json=` for JSON posts; **multipart** when attaching tracebacks); **rich embeds are the default** (`DiscordTransportOptions.use_embeds` defaults to `true`); configurable **retries with backoff** for transient HTTP failures and **429** (`Retry-After`), applied **per webhook POST** (see [Delivery semantics](#delivery-semantics))
-- **`DiscordTransportOptions`** — GitHub deep links, static URLs, env-sourced metadata, long tracebacks as **file uploads**, **`use_embeds`** to prefer embed vs plain channel posts, **`allowed_mentions`** via **`AllowedMentionsOptions`**, and an **`alert_footer`** line on the **last** chunk when posts are split
+- **`DiscordTransportOptions`** — pass as ``options`` and/or keywords on **`DiscordTransport`**: :meth:`from_env` is the baseline; non-default fields on ``options`` and then kwargs override; anything you leave at library defaults on ``options`` keeps the env value
 - **`AlertClient`** with `send`, `low`, `high`, and `critical` helpers
 - **`SendResult`** for simple success / HTTP / error reporting
 - **`github_blob_url()`** for advanced callers building GitHub links outside the transport
@@ -84,6 +84,18 @@ transport = DiscordTransport("https://discord.com/api/webhooks/...", options=opt
 client = AlertClient(transport)
 ```
 
+You can also pass option fields as keywords (merged into ``options`` or into empty defaults):
+
+```python
+transport = DiscordTransport(
+    "https://discord.com/api/webhooks/...",
+    use_embeds=False,
+    webhook_max_attempts=5,
+)
+```
+
+Baseline is :meth:`DiscordTransportOptions.from_env`. Override with any ``options`` fields that differ from library defaults, then with **keyword arguments** (kwargs always win). Fields still at defaults on ``options`` behave as “unset” and keep the env value.
+
 When `attach_exception_over_chars` is set and the formatted traceback is longer, the **first** webhook call sends **multipart** data: a short `content` plus `traceback.txt` (remaining message chunks, if any, are plain JSON posts).
 
 GitHub URLs are merged into alert metadata (shown in the Discord body) **only** when `source_root` is set so traceback file paths can be relativized into the repo.
@@ -126,15 +138,25 @@ client.send(
 
 ### Environment-based client
 
+``AlertClient.from_discord_webhook_env`` reads the webhook URL from ``DISCORD_WEBHOOK`` (or another variable you name), then uses the same merge as :class:`DiscordTransport` (``from_env`` baseline, ``discord_options``, kwargs).
+
 ```python
 from team_alerts import AlertClient, DiscordTransportOptions
 
-# Optional: load TEAM_ALERTS_* / GITHUB_* driven options from the environment
+# No explicit options: same as empty config, env supplies TEAM_ALERTS_* / GITHUB_* where set
+client = AlertClient.from_discord_webhook_env()
+client.low("Hello")
+
+# Partial config: e.g. force plain mode in code; GitHub/ref etc. can still come from env
 client = AlertClient.from_discord_webhook_env(
-    discord_options=DiscordTransportOptions.from_env(),
+    discord_options=DiscordTransportOptions(use_embeds=False),
 )
-client.low("Hello from env-configured webhook")
+
+# Same via kwargs (merged with discord_options if both are passed)
+client = AlertClient.from_discord_webhook_env(use_embeds=False, webhook_max_attempts=1)
 ```
+
+Use :meth:`DiscordTransportOptions.from_env` when you need the **environment-only** snapshot (tests, building another layer on top).
 
 ## Environment variables
 
@@ -142,8 +164,8 @@ client.low("Hello from env-configured webhook")
 |----------|---------|
 | `DISCORD_WEBHOOK` | Incoming webhook URL used by `AlertClient.from_discord_webhook_env()` |
 | `RUN_LIVE_DISCORD_TESTS` | Set to `1` to enable real webhook tests in `tests/test_live_discord.py` |
-| `GITHUB_REPOSITORY` | `owner/repo`; used with `DiscordTransportOptions.from_env()` |
-| `GITHUB_SHA`, `GIT_COMMIT`, `GITHUB_REF_NAME` | Ref for GitHub blob links (`from_env()` picks the first that is set) |
+| `GITHUB_REPOSITORY` | `owner/repo` for GitHub blob links (via `from_env()` / transport merge) |
+| `GITHUB_SHA`, `GIT_COMMIT`, `GITHUB_REF_NAME` | Ref for GitHub blob links (first set wins in `from_env()`) |
 | `GITHUB_SERVER_URL` | GitHub Enterprise / API base; `from_env()` maps `/api/v3` hosts to a web base when possible |
 | `TEAM_ALERTS_GITHUB_SOURCE_ROOT` | Absolute repo root on disk for traceback → repo-relative paths |
 | `TEAM_ALERTS_ATTACH_EXCEPTION_OVER` | Integer: send traceback as a **file** when longer than this many characters |

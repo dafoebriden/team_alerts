@@ -6,6 +6,7 @@ import pytest
 
 from team_alerts.client import AlertClient
 from team_alerts.constants import Severity
+from team_alerts.discord_options import DiscordTransportOptions
 from team_alerts.exceptions import ConfigurationError
 from team_alerts.models import Alert
 from team_alerts.result import SendResult
@@ -66,3 +67,48 @@ def test_from_discord_webhook_env_custom_var(monkeypatch: pytest.MonkeyPatch) ->
     transport = client._transport  # noqa: SLF001
     assert isinstance(transport, DiscordTransport)
     assert transport.webhook_url.endswith("/y")
+
+
+def test_from_discord_webhook_env_loads_from_env_when_no_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/test/token")
+    monkeypatch.setenv("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "4")
+    client = AlertClient.from_discord_webhook_env()
+    transport = client._transport  # noqa: SLF001
+    assert isinstance(transport, DiscordTransport)
+    assert transport.options.webhook_max_attempts == 4
+
+
+def test_from_discord_webhook_env_explicit_overrides_env_for_nondefault_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/test/token")
+    monkeypatch.setenv("TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS", "9")
+    opts = DiscordTransportOptions(webhook_max_attempts=1)
+    client = AlertClient.from_discord_webhook_env(discord_options=opts)
+    transport = client._transport  # noqa: SLF001
+    assert transport.options.webhook_max_attempts == 1
+
+
+def test_from_discord_webhook_env_config_primary_env_fills_github(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/test/token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "env/org")
+    monkeypatch.setenv("GITHUB_SHA", "envsha")
+    override = DiscordTransportOptions(use_embeds=False)
+    client = AlertClient.from_discord_webhook_env(discord_options=override)
+    transport = client._transport  # noqa: SLF001
+    assert transport.options.use_embeds is False
+    assert transport.options.github is not None
+    assert transport.options.github.repository == "env/org"
+    assert transport.options.github.ref == "envsha"
+
+
+def test_from_discord_webhook_env_option_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/test/token")
+    monkeypatch.setenv("TEAM_ALERTS_USE_EMBEDS", "1")
+    client = AlertClient.from_discord_webhook_env(use_embeds=False)
+    transport = client._transport  # noqa: SLF001
+    assert transport.options.use_embeds is False

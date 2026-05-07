@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass, fields, field, replace
+from typing import Any, Literal
 
 MetadataUrlLinkStyle = Literal["angle", "markdown"]
 
@@ -76,8 +76,12 @@ class GitHubLinkOptions:
 @dataclass(slots=True)
 class DiscordTransportOptions:
     """
-    Optional Discord delivery behavior: long tracebacks as file uploads, GitHub
-    links, static links, and copying selected environment variables into metadata.
+    Discord delivery configuration: long tracebacks as file uploads, GitHub links,
+    static links, and copying selected environment variables into metadata.
+
+    :class:`DiscordTransport` starts from :meth:`from_env`, applies any fields you
+    set on an ``options`` instance that differ from library defaults, then applies
+    keyword arguments (see transport ``__init__``).
     """
 
     attach_exception_over_chars: int | None = None
@@ -162,6 +166,18 @@ class DiscordTransportOptions:
     webhook_retry_jitter_seconds: float = 0.25
     """Random jitter in ``[0, jitter]`` added to backoff sleeps."""
 
+    def nondefault_option_overrides(self) -> dict[str, Any]:
+        """
+        Fields on ``self`` that differ from a fresh :class:`DiscordTransportOptions`
+        (library defaults), merged on top of :meth:`from_env` by :class:`DiscordTransport`.
+        """
+        baseline = _default_discord_transport_options()
+        return {
+            f.name: getattr(self, f.name)
+            for f in fields(DiscordTransportOptions)
+            if getattr(self, f.name) != getattr(baseline, f.name)
+        }
+
     @classmethod
     def from_env(
         cls,
@@ -171,6 +187,9 @@ class DiscordTransportOptions:
     ) -> DiscordTransportOptions:
         """
         Build options from common environment variables (all optional).
+
+        Environment-only snapshot (see :class:`DiscordTransport` for merging with
+        explicit ``options`` and kwargs).
 
         Recognized variables:
 
@@ -280,3 +299,15 @@ def _github_html_base_from_env() -> str:
     if raw.endswith("/api/v3"):
         return raw[: -len("/api/v3")] or "https://github.com"
     return raw
+
+
+_DEFAULT_DISCORD_TRANSPORT_OPTIONS: DiscordTransportOptions | None = None
+
+
+def _default_discord_transport_options() -> DiscordTransportOptions:
+    global _DEFAULT_DISCORD_TRANSPORT_OPTIONS
+    if _DEFAULT_DISCORD_TRANSPORT_OPTIONS is None:
+        _DEFAULT_DISCORD_TRANSPORT_OPTIONS = DiscordTransportOptions()
+    return _DEFAULT_DISCORD_TRANSPORT_OPTIONS
+
+
