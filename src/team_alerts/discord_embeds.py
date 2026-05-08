@@ -18,8 +18,8 @@ from team_alerts.constants import (
     Severity,
 )
 from team_alerts.discord_options import AllowedMentionsOptions, DiscordTransportOptions, MetadataUrlLinkStyle
-from team_alerts.formatters import discord_relative_timestamp, format_severity_with_level_bar
-from team_alerts.models import Alert
+from team_alerts.formatters import discord_relative_timestamp, format_severity_for_discord
+from team_alerts.models import Alert, SeverityRenderStyle
 
 
 def traceback_fits_single_exception_field(traceback_text: str) -> bool:
@@ -93,10 +93,10 @@ def metadata_to_embed_fields(
     return fields
 
 
-def _embed_header_block(alert: Alert) -> str:
+def _embed_header_block(alert: Alert, *, severity_render_style: SeverityRenderStyle = "emoji") -> str:
     """Severity bar, service, env, identity lines, and when — no ``Alert.message`` body."""
     lines: list[str] = []
-    lines.append(format_severity_with_level_bar(alert.severity))
+    lines.append(format_severity_for_discord(alert.severity, render_style=severity_render_style))
     if alert.service:
         lines.append(f"**Service:** {alert.service}")
     if alert.environment:
@@ -112,14 +112,16 @@ def _embed_header_block(alert: Alert) -> str:
     return "\n".join(lines).strip()
 
 
-def _description_header_and_overflow(alert: Alert) -> tuple[str, str]:
+def _description_header_and_overflow(
+    alert: Alert, *, severity_render_style: SeverityRenderStyle = "emoji"
+) -> tuple[str, str]:
     """
     Embed description and optional plain-text overflow for ``message.txt``.
 
     The message is inlined when ``header + message`` fits in the embed description
     limit; otherwise the description points to an attachment with the full body.
     """
-    header = _embed_header_block(alert)
+    header = _embed_header_block(alert, severity_render_style=severity_render_style)
     raw_msg = alert.message or ""
     if not raw_msg.strip():
         desc = header
@@ -141,6 +143,7 @@ def build_alert_embed(
     options: DiscordTransportOptions,
     include_exception_in_body: bool,
     exception_text: str | None,
+    severity_render_style: SeverityRenderStyle = "emoji",
 ) -> tuple[dict[str, Any], str]:
     """
     Build a single Discord embed dict for ``alert`` plus plain-text overflow from
@@ -149,7 +152,7 @@ def build_alert_embed(
     raw_title = (alert.title or "").strip()
     title = _truncate(raw_title if raw_title else "Alert", 256)
 
-    desc, overflow = _description_header_and_overflow(alert)
+    desc, overflow = _description_header_and_overflow(alert, severity_render_style=severity_render_style)
 
     need_exc = bool(include_exception_in_body and exception_text)
     max_meta = DISCORD_EMBED_MAX_FIELDS - (1 if need_exc else 0)
@@ -195,7 +198,9 @@ def build_alert_embed(
             dt = dt.replace(tzinfo=timezone.utc)
         embed["timestamp"] = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    embed, overflow_patch = _fit_embed_under_total_cap(embed, overflow == "", alert)
+    embed, overflow_patch = _fit_embed_under_total_cap(
+        embed, overflow == "", alert, severity_render_style=severity_render_style
+    )
     if overflow_patch is not None:
         overflow = overflow_patch
     embed = _shrink_embed_until_under_cap(embed)
@@ -206,6 +211,8 @@ def _fit_embed_under_total_cap(
     embed: dict[str, Any],
     message_is_inlined: bool,
     alert: Alert,
+    *,
+    severity_render_style: SeverityRenderStyle = "emoji",
 ) -> tuple[dict[str, Any], str | None]:
     """
     If the message is inlined but the embed JSON still exceeds Discord's total cap
@@ -228,7 +235,7 @@ def _fit_embed_under_total_cap(
     if size() <= DISCORD_EMBED_TOTAL_MAX:
         return embed, None
 
-    header = _embed_header_block(alert)
+    header = _embed_header_block(alert, severity_render_style=severity_render_style)
     note = f"{header}\n\n*(Full message in attachment.)*".strip()
     if len(note) > DISCORD_EMBED_DESCRIPTION_MAX:
         note = note[:DISCORD_EMBED_DESCRIPTION_MAX]

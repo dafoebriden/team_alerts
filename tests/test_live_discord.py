@@ -8,6 +8,12 @@ post when needed. No multi-chunk ``content`` chains for overflow.
 
 Set ``RUN_LIVE_DISCORD_TESTS=1`` and ``DISCORD_WEBHOOK`` to enable, or define
 them in ``.env.local`` at the repo root (loaded automatically by ``conftest.py``).
+
+Category markers let you run subsets, for example:
+
+* ``pytest tests/test_live_discord.py -m live_severity_style``
+* ``pytest tests/test_live_discord.py -m live_plain``
+* ``pytest tests/test_live_discord.py -m live_embed``
 """
 
 from __future__ import annotations
@@ -42,6 +48,8 @@ def _assert_send_ok(result, *, label: str) -> None:
     )
 
 
+@pytest.mark.live_embed
+@pytest.mark.live_smoke
 def test_live_plain_operational_ping() -> None:
     """Low-severity default transport: embed with short narrative inlined (JSON webhook)."""
     client = AlertClient.from_discord_webhook_env()
@@ -55,6 +63,8 @@ def test_live_plain_operational_ping() -> None:
     _assert_send_ok(result, label="embed ping")
 
 
+@pytest.mark.live_plain
+@pytest.mark.live_smoke
 def test_live_explicit_plain_text_payload() -> None:
     """Short body: classic ``content`` only (``discord_payload_style='plain'``)."""
     client = AlertClient.from_discord_webhook_env()
@@ -71,6 +81,51 @@ def test_live_explicit_plain_text_payload() -> None:
     _assert_send_ok(result, label="plain canary")
 
 
+@pytest.mark.live_severity_style
+@pytest.mark.parametrize(
+    ("style", "label"),
+    [
+        ("bar", "severity style bar"),
+        ("label", "severity style label"),
+        ("emoji", "severity style emoji"),
+        ("emoji_bar", "severity style emoji_bar"),
+    ],
+    ids=["bar", "label", "emoji", "emoji_bar"],
+)
+def test_live_severity_render_style_option_each_style(style: str, label: str) -> None:
+    """Transport-level severity style checks, one live send per style option."""
+    opts = DiscordTransportOptions(use_embeds=False, severity_render_style=style)
+    client = AlertClient(DiscordTransport(WEBHOOK, options=opts))
+    result = client.send(
+        Alert(
+            message=f"Severity rendering check for style={style}.",
+            severity=Severity.MEDIUM,
+            title=f"Severity style option ({style})",
+            service="observability",
+            environment=os.environ.get("ENV", "staging"),
+        )
+    )
+    _assert_send_ok(result, label=label)
+
+
+@pytest.mark.live_severity_style
+def test_live_severity_render_style_per_alert_override() -> None:
+    """Per-alert override can force bar style without changing transport default."""
+    client = AlertClient.from_discord_webhook_env()
+    result = client.send(
+        Alert(
+            message="Severity rendering check with per-alert bar override.",
+            severity=Severity.HIGH,
+            title="Severity style alert override (bar)",
+            service="observability",
+            environment=os.environ.get("ENV", "staging"),
+            discord_severity_render_style="bar",
+        )
+    )
+    _assert_send_ok(result, label="severity style override")
+
+
+@pytest.mark.live_plain
 def test_live_plain_long_body_single_multipart_file() -> None:
     """Plain mode over 2000 chars: one webhook with ``message.txt`` (no follow-up chunks)."""
     client = AlertClient.from_discord_webhook_env()
@@ -90,6 +145,7 @@ def test_live_plain_long_body_single_multipart_file() -> None:
     _assert_send_ok(result, label="plain long multipart")
 
 
+@pytest.mark.live_embed
 def test_live_upstream_dependency_failure() -> None:
     """HIGH outage: embed with metadata fields and narrative inlined in the description."""
     client = AlertClient.from_discord_webhook_env()
@@ -116,6 +172,7 @@ def test_live_upstream_dependency_failure() -> None:
     _assert_send_ok(result, label="upstream failure")
 
 
+@pytest.mark.live_exception
 def test_live_handler_exception_with_traceback() -> None:
     """Critical failure: embed with narrative + ``Exception`` field for a typical short stack."""
 
@@ -154,6 +211,7 @@ def test_live_handler_exception_with_traceback() -> None:
     _assert_send_ok(result, label="handler traceback")
 
 
+@pytest.mark.live_embed
 def test_live_long_log_tail_style_message() -> None:
     """Long log body: full text in ``message.txt``; embed description is headers + pointer + metadata fields."""
     lines = [f"[{i:04d}] worker=pool-A status=ok latency_ms={20 + (i % 17)}" for i in range(120)]
@@ -173,6 +231,7 @@ def test_live_long_log_tail_style_message() -> None:
     _assert_send_ok(result, label="long message")
 
 
+@pytest.mark.live_exception
 def test_live_traceback_as_file_attachment() -> None:
     """
     Deep stack: short narrative stays in the embed description; formatted traceback
@@ -233,6 +292,7 @@ def test_live_traceback_as_file_attachment() -> None:
     ),
     reason="Set GITHUB_REPOSITORY and GITHUB_SHA (or GIT_COMMIT / GITHUB_REF_NAME) for GitHub link live test.",
 )
+@pytest.mark.live_github
 def test_live_github_metadata_when_ci_env_present() -> None:
     """CI env: GitHub URL in embed fields; short narrative and typical traceback inlined in the embed when they fit."""
     opts = DiscordTransportOptions.from_env()
@@ -261,6 +321,7 @@ def test_live_github_metadata_when_ci_env_present() -> None:
     _assert_send_ok(result, label="github metadata")
 
 
+@pytest.mark.live_embed
 def test_live_embed_mode_with_model_identity_fields() -> None:
     """Identity fields and reconciliation note inlined in the embed description (JSON post)."""
     base_opts = DiscordTransportOptions.from_env()

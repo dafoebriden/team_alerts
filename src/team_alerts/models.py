@@ -17,6 +17,24 @@ Per-alert Discord layout override.
 * ``plain`` — plain ``content`` (classic text layout) for this alert only.
 """
 
+SeverityRenderStyle = Literal["bar", "label", "emoji", "emoji_bar"]
+"""
+How Discord severity is rendered in alert headers.
+
+* ``emoji`` — emoji plus bold severity label (default).
+* ``bar`` — bold severity plus a level bar.
+* ``label`` — bold severity only.
+* ``emoji_bar`` — emoji, bold severity, and level bar.
+"""
+
+AlertSeverityRenderStyle = Literal["auto", "bar", "label", "emoji", "emoji_bar"]
+"""
+Per-alert override for Discord severity rendering.
+
+* ``auto`` — use transport/default options.
+* other values — force the selected style for this alert.
+"""
+
 
 @dataclass(slots=True)
 class Alert:
@@ -49,4 +67,9 @@ class Alert:
     discord_payload_style: DiscordPayloadStyle = "auto"
     """
     Override how this alert is rendered on Discord relative to transport defaults.
+    """
+
+    discord_severity_render_style: AlertSeverityRenderStyle = "auto"
+    """
+    Override severity rendering for this alert relative to transport defaults.
     """

@@ -76,7 +76,8 @@ def test_discord_transport_send_success() -> None:
     assert payload["embeds"]
     desc = payload["embeds"][0]["description"]
     assert "hello" in desc
-    assert "\u2588" in desc
+    assert desc.startswith("\U0001f7e2 **LOW**")
+    assert "\u2588" not in desc
     assert "files" not in kwargs
     assert "timeout" in kwargs
 
@@ -98,7 +99,47 @@ def test_discord_transport_plain_payload_style_overrides_default_embed() -> None
     assert "embeds" not in payload or not payload.get("embeds")
     assert payload["content"]
     assert "plain body" in payload["content"]
-    assert "\u2588" in payload["content"]
+    assert "\U0001f7e0 **HIGH**" in payload["content"]
+    assert "\u2588" not in payload["content"]
+
+
+def test_discord_transport_uses_option_severity_render_style_in_plain_mode() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    opts = DiscordTransportOptions(use_embeds=False, severity_render_style="label")
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
+        result = transport.send(Alert(message="plain body", severity=Severity.HIGH))
+
+    assert result.success is True
+    content = post.call_args.kwargs["json"]["content"]
+    assert "**HIGH**" in content
+    assert "\u2588" not in content
+
+
+def test_discord_transport_alert_severity_render_style_overrides_options() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    opts = DiscordTransportOptions(severity_render_style="label")
+    alert = Alert(
+        message="embed body",
+        severity=Severity.CRITICAL,
+        discord_severity_render_style="emoji_bar",
+    )
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
+        result = transport.send(alert)
+
+    assert result.success is True
+    desc = post.call_args.kwargs["json"]["embeds"][0]["description"]
+    assert desc.startswith("\U0001f534 **CRITICAL**")
+    assert "\u2588" in desc
 
 
 def test_discord_transport_send_http_error() -> None:
@@ -202,7 +243,7 @@ def test_discord_transport_banner_disabled_when_blank_option() -> None:
 
     content = post.call_args.kwargs["json"]["content"]
     assert not content.startswith(DEFAULT_ALERT_BANNER_LINE)
-    assert content.startswith("**LOW**")
+    assert content.startswith("\U0001f7e2 **LOW**")
 
 
 def test_discord_transport_request_exception() -> None:
@@ -285,7 +326,8 @@ def test_discord_transport_embed_mode_posts_embed() -> None:
     assert embeds[0]["title"] == "T"
     assert "hello" in embeds[0]["description"]
     assert "trace-99" in embeds[0]["description"]
-    assert "\u2588" in embeds[0]["description"]
+    assert embeds[0]["description"].startswith("\U0001f534 **CRITICAL**")
+    assert "\u2588" not in embeds[0]["description"]
 
 
 def test_discord_transport_allowed_mentions_roles() -> None:

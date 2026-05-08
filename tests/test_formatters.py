@@ -16,6 +16,7 @@ from team_alerts.formatters import (
     format_alert_discord_text,
     format_exception,
     format_metadata_markdown,
+    format_severity_for_discord,
     format_severity_label,
     format_severity_with_level_bar,
     split_long_text,
@@ -33,6 +34,19 @@ def test_format_severity_with_level_bar_length_and_fill() -> None:
     crit = format_severity_with_level_bar(Severity.CRITICAL)
     assert low.count("\u2588") < crit.count("\u2588")
     assert "**LOW**" in low and "**CRITICAL**" in crit
+
+
+def test_format_severity_for_discord_render_styles() -> None:
+    bar = format_severity_for_discord(Severity.HIGH, render_style="bar")
+    label = format_severity_for_discord(Severity.HIGH, render_style="label")
+    emoji = format_severity_for_discord(Severity.HIGH, render_style="emoji")
+    emoji_bar = format_severity_for_discord(Severity.HIGH, render_style="emoji_bar")
+
+    assert "\u2588" in bar
+    assert label == "**HIGH**"
+    assert emoji.startswith("\U0001f7e0 **HIGH**")
+    assert emoji_bar.startswith("\U0001f7e0 **HIGH**")
+    assert "\u2588" in emoji_bar
 
 
 def test_format_metadata_markdown_empty() -> None:
@@ -87,7 +101,7 @@ def test_format_exception_includes_message_and_type() -> None:
 def test_format_alert_discord_text_no_banner_by_default() -> None:
     alert = Alert(message="x", severity=Severity.LOW)
     out = format_alert_discord_text(alert)
-    assert out.startswith("**LOW**")
+    assert out.startswith("\U0001f7e2 **LOW**")
 
 
 def test_format_alert_discord_text_with_banner() -> None:
@@ -123,6 +137,13 @@ def test_format_alert_discord_text_basic() -> None:
     assert "**Service:**" in out and "worker" in out
     assert "**Environment:**" in out and "prod" in out
     assert "request_id" in out
+
+
+def test_format_alert_text_uses_requested_severity_render_style() -> None:
+    alert = Alert(message="Something happened", severity=Severity.LOW)
+    out = format_alert_discord_text(alert, severity_render_style="emoji")
+    assert out.startswith("\U0001f7e2 **LOW**")
+    assert "\u2588" not in out
 
 
 def test_format_alert_exception_attachment_mode() -> None:
@@ -221,6 +242,13 @@ def test_format_alert_discord_chunks_continuation_has_identity_marker() -> None:
     assert "corr-1" in chunks[0]
     assert chunks[1].startswith("**[2/")
     assert "corr-1" in chunks[1] and "run-9" in chunks[1]
+
+
+def test_format_alert_discord_chunks_uses_requested_severity_render_style() -> None:
+    alert = Alert(message="chunk me\n" * 100, severity=Severity.MEDIUM)
+    chunks = format_alert_discord_chunks(alert, chunk_size=180, severity_render_style="label")
+    assert chunks[0].startswith("**MEDIUM**")
+    assert "\u2588" not in chunks[0]
 
 
 def test_apply_identity_markers_all_chunks_when_not_in_leading() -> None:

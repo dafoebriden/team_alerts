@@ -13,6 +13,8 @@ __all__ = [
     "Alert",
     "AlertClient",
     "DiscordPayloadStyle",
+    "AlertSeverityRenderStyle",
+    "SeverityRenderStyle",
     "AllowedMentionsOptions",
     "DiscordTransport",
     "DiscordTransportOptions",
@@ -33,6 +35,14 @@ def __getattr__(name: str) -> Any:
         from team_alerts.models import DiscordPayloadStyle
 
         return DiscordPayloadStyle
+    if name == "AlertSeverityRenderStyle":
+        from team_alerts.models import AlertSeverityRenderStyle
+
+        return AlertSeverityRenderStyle
+    if name == "SeverityRenderStyle":
+        from team_alerts.models import SeverityRenderStyle
+
+        return SeverityRenderStyle
     if name == "Severity":
         from team_alerts.constants import Severity
 
@@ -83,5 +93,5 @@ if TYPE_CHECKING:
     )
     from team_alerts.formatters import discord_relative_timestamp
     from team_alerts.links import github_blob_url
-    from team_alerts.models import Alert, DiscordPayloadStyle
+    from team_alerts.models import Alert, AlertSeverityRenderStyle, DiscordPayloadStyle, SeverityRenderStyle
     from team_alerts.transports.discord import DiscordTransport

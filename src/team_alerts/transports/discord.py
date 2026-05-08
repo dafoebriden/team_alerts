@@ -31,7 +31,7 @@ from team_alerts.formatters import (
     format_exception,
 )
 from team_alerts.links import github_blob_url, pick_github_frame, repo_relative_path
-from team_alerts.models import Alert
+from team_alerts.models import Alert, SeverityRenderStyle
 from team_alerts.result import SendResult
 from team_alerts.transports.base import BaseTransport
 from team_alerts.webhook_retry import is_retriable_http_status, sleep_before_retry
@@ -44,6 +44,16 @@ def _use_embeds_effective(options: DiscordTransportOptions, alert: Alert) -> boo
     if style == "plain":
         return False
     return options.use_embeds
+
+
+def _severity_render_style_effective(
+    options: DiscordTransportOptions,
+    alert: Alert,
+) -> SeverityRenderStyle:
+    style = alert.discord_severity_render_style
+    if style == "auto":
+        return options.severity_render_style
+    return style
 
 
 class DiscordTransport(BaseTransport):
@@ -96,7 +106,12 @@ class DiscordTransport(BaseTransport):
         )
 
         if _use_embeds_effective(self._options, prepared):
-            return self._send_embed_mode(prepared, tb_text, mentions)
+            return self._send_embed_mode(
+                prepared,
+                tb_text,
+                mentions,
+                severity_render_style=_severity_render_style_effective(self._options, prepared),
+            )
 
         if use_file:
             chunks = list(
@@ -106,6 +121,7 @@ class DiscordTransport(BaseTransport):
                     exception_attachment_filename=self._options.exception_attachment_filename,
                     metadata_url_link_style=self._options.metadata_url_link_style,
                     alert_banner=_alert_banner_line(self._options),
+                    severity_render_style=_severity_render_style_effective(self._options, prepared),
                 )
             )
             chunks = append_footer_to_last_chunk(chunks, self._options.alert_footer)
@@ -127,6 +143,7 @@ class DiscordTransport(BaseTransport):
                 prepared,
                 metadata_url_link_style=self._options.metadata_url_link_style,
                 alert_banner=_alert_banner_line(self._options),
+                severity_render_style=_severity_render_style_effective(self._options, prepared),
             )
         )
         chunks = append_footer_to_last_chunk(chunks, self._options.alert_footer)
@@ -151,6 +168,8 @@ class DiscordTransport(BaseTransport):
         alert: Alert,
         tb_text: str,
         mentions: dict[str, Any] | None,
+        *,
+        severity_render_style: SeverityRenderStyle,
     ) -> SendResult:
         threshold = self._options.attach_exception_over_chars
         use_tb_file = _embed_traceback_as_file(tb_text, threshold)
@@ -159,6 +178,7 @@ class DiscordTransport(BaseTransport):
             options=self._options,
             include_exception_in_body=bool(tb_text) and not use_tb_file,
             exception_text=tb_text if not use_tb_file else None,
+            severity_render_style=severity_render_style,
         )
 
         footer = (self._options.alert_footer or "").strip()

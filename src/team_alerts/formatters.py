@@ -8,7 +8,7 @@ from typing import Any, Iterable
 
 from team_alerts.constants import DISCORD_CONTENT_MAX_CHARS, DEFAULT_CHUNK_SIZE, Severity
 from team_alerts.discord_options import MetadataUrlLinkStyle
-from team_alerts.models import Alert
+from team_alerts.models import Alert, SeverityRenderStyle
 
 
 def format_severity_label(severity: Severity) -> str:
@@ -23,6 +23,12 @@ _SEVERITY_BAR_FILLED: dict[Severity, int] = {
     Severity.CRITICAL: 10,
 }
 _LEVEL_BAR_WIDTH = 10
+_SEVERITY_EMOJI: dict[Severity, str] = {
+    Severity.LOW: "\U0001f7e2",
+    Severity.MEDIUM: "\U0001f7e1",
+    Severity.HIGH: "\U0001f7e0",
+    Severity.CRITICAL: "\U0001f534",
+}
 
 
 def format_severity_with_level_bar(severity: Severity) -> str:
@@ -34,6 +40,18 @@ def format_severity_with_level_bar(severity: Severity) -> str:
     filled = _SEVERITY_BAR_FILLED[severity]
     bar = "\u2588" * filled + "\u2591" * (_LEVEL_BAR_WIDTH - filled)
     return f"**{label}**  `{bar}`"
+
+
+def format_severity_for_discord(severity: Severity, *, render_style: SeverityRenderStyle = "emoji") -> str:
+    """Render severity text in one of the supported Discord header styles."""
+    label = format_severity_label(severity)
+    if render_style == "label":
+        return f"**{label}**"
+    if render_style == "emoji":
+        return f"{_SEVERITY_EMOJI[severity]} **{label}**"
+    if render_style == "emoji_bar":
+        return f"{_SEVERITY_EMOJI[severity]} {format_severity_with_level_bar(severity)}"
+    return format_severity_with_level_bar(severity)
 
 
 def discord_relative_timestamp(dt: datetime) -> str:
@@ -214,6 +232,7 @@ def format_alert_discord_text(
     exception_attachment_filename: str = "traceback.txt",
     metadata_url_link_style: MetadataUrlLinkStyle = "angle",
     alert_banner: str = "",
+    severity_render_style: SeverityRenderStyle = "emoji",
 ) -> str:
     """
     Format an alert as a single Discord-safe plain-text/markdown string.
@@ -226,6 +245,7 @@ def format_alert_discord_text(
         include_exception_in_body=include_exception_in_body,
         exception_attachment_filename=exception_attachment_filename,
         metadata_url_link_style=metadata_url_link_style,
+        severity_render_style=severity_render_style,
     )
     body = "\n".join(parts)
     line = _normalize_banner_line(alert_banner)
@@ -245,6 +265,7 @@ def format_alert_discord_chunks(
     exception_attachment_filename: str = "traceback.txt",
     metadata_url_link_style: MetadataUrlLinkStyle = "angle",
     alert_banner: str = "",
+    severity_render_style: SeverityRenderStyle = "emoji",
 ) -> list[str]:
     """Format an alert and split into Discord-sized chunks if needed."""
     parts = _alert_body_parts(
@@ -252,6 +273,7 @@ def format_alert_discord_chunks(
         include_exception_in_body=include_exception_in_body,
         exception_attachment_filename=exception_attachment_filename,
         metadata_url_link_style=metadata_url_link_style,
+        severity_render_style=severity_render_style,
     )
     body = "\n".join(parts)
     line = _normalize_banner_line(alert_banner)
@@ -293,9 +315,10 @@ def _alert_body_parts(
     include_exception_in_body: bool = True,
     exception_attachment_filename: str = "traceback.txt",
     metadata_url_link_style: MetadataUrlLinkStyle = "angle",
+    severity_render_style: SeverityRenderStyle = "emoji",
 ) -> list[str]:
     lines: list[str] = []
-    lines.append(format_severity_with_level_bar(alert.severity))
+    lines.append(format_severity_for_discord(alert.severity, render_style=severity_render_style))
     if alert.service:
         lines.append(f"**Service:** `{_escape_backticks(alert.service)}`")
     if alert.environment:

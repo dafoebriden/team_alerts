@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, fields, field, replace
 from typing import Any, Literal
 
+from team_alerts.models import SeverityRenderStyle
+
 MetadataUrlLinkStyle = Literal["angle", "markdown"]
 
 
@@ -123,6 +125,16 @@ class DiscordTransportOptions:
     * ``markdown`` — ``[key](https://…)`` with visible label from the metadata key.
     """
 
+    severity_render_style: SeverityRenderStyle = "emoji"
+    """
+    How severity is rendered in Discord alert headers:
+
+    * ``emoji`` — ``🟠 **HIGH**`` (default).
+    * ``bar`` — ``**HIGH**  `███████░░░` ``.
+    * ``label`` — ``**HIGH**``.
+    * ``emoji_bar`` — ``🟠 **HIGH**  `███████░░░` ``.
+    """
+
     alert_banner: str | None = None
     """
     Visual separator prepended before the alert body (first chunk only when split).
@@ -201,6 +213,8 @@ class DiscordTransportOptions:
         * ``TEAM_ALERTS_ENV_METADATA`` — comma-separated env var names to copy to metadata
         * ``TEAM_ALERTS_METADATA_URL_STYLE`` — ``markdown`` (or ``md`` / ``labeled``) for
           ``[visible text](url)`` metadata links; otherwise ``angle`` brackets
+        * ``TEAM_ALERTS_SEVERITY_RENDER_STYLE`` — ``bar`` / ``label`` / ``emoji`` /
+          ``emoji_bar`` for Discord severity header rendering (default ``emoji``)
         * ``TEAM_ALERTS_ALERT_BANNER`` — ``0`` / ``false`` / ``off`` to disable the top
           separator; any other non-empty value becomes a **custom** banner line
           (otherwise the package default is used)
@@ -247,6 +261,11 @@ class DiscordTransportOptions:
         if style_raw in ("markdown", "md", "labeled"):
             link_style = "markdown"
 
+        severity_style_raw = os.environ.get("TEAM_ALERTS_SEVERITY_RENDER_STYLE", "").strip().lower()
+        severity_render_style: SeverityRenderStyle = "emoji"
+        if severity_style_raw in ("bar", "label", "emoji", "emoji_bar"):
+            severity_render_style = severity_style_raw
+
         banner_raw = os.environ.get("TEAM_ALERTS_ALERT_BANNER", "").strip()
         alert_banner: str | None = None
         if banner_raw.lower() in ("0", "false", "no", "off"):
@@ -277,6 +296,7 @@ class DiscordTransportOptions:
             github=github,
             env_metadata_keys=env_keys,
             metadata_url_link_style=link_style,
+            severity_render_style=severity_render_style,
             alert_banner=alert_banner,
             use_embeds=use_embeds,
             allowed_mentions=allowed,

@@ -25,3 +25,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "live_smoke: live Discord smoke checks",
+    "live_severity_style: live Discord severity style checks",
+    "live_plain: live plain-content Discord checks",
+    "live_embed: live embed Discord checks",
+    "live_exception: live exception/traceback Discord checks",
+    "live_github: live GitHub metadata Discord checks",
+]

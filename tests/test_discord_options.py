@@ -82,6 +82,15 @@ def test_from_env_metadata_url_link_style(monkeypatch: pytest.MonkeyPatch) -> No
     assert DiscordTransportOptions.from_env().metadata_url_link_style == "angle"
 
 
+def test_from_env_severity_render_style(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_SEVERITY_RENDER_STYLE", "label")
+    assert DiscordTransportOptions.from_env().severity_render_style == "label"
+    monkeypatch.setenv("TEAM_ALERTS_SEVERITY_RENDER_STYLE", "emoji")
+    assert DiscordTransportOptions.from_env().severity_render_style == "emoji"
+    monkeypatch.setenv("TEAM_ALERTS_SEVERITY_RENDER_STYLE", "invalid")
+    assert DiscordTransportOptions.from_env().severity_render_style == "emoji"
+
+
 def test_nondefault_option_overrides_only_differs_from_defaults() -> None:
     opts = DiscordTransportOptions(use_embeds=False, webhook_max_attempts=5)
     keys = set(opts.nondefault_option_overrides())
