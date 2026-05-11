@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import timezone
 from typing import Any
 
@@ -17,7 +18,13 @@ from team_alerts.constants import (
     EMBED_COLOR_MEDIUM,
     Severity,
 )
-from team_alerts.discord_options import AllowedMentionsOptions, DiscordTransportOptions, MetadataUrlLinkStyle
+from team_alerts.discord_options import (
+    AllowedMentionsOptions,
+    DiscordTransportOptions,
+    MetadataCodeFenceStyle,
+    MetadataEmbedFieldOrder,
+    MetadataUrlLinkStyle,
+)
 from team_alerts.formatters import discord_relative_timestamp, format_severity_for_discord
 from team_alerts.models import Alert, SeverityRenderStyle
 
@@ -67,6 +74,12 @@ def allowed_mentions_payload(opts: AllowedMentionsOptions | None) -> dict[str, A
     return out
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
 def _truncate(s: str, max_len: int) -> str:
     if len(s) <= max_len:
         return s
@@ -74,23 +87,143 @@ def _truncate(s: str, max_len: int) -> str:
     return s[: max_len - reserve] + "…"
 
 
+def _strip_outer_code_fence(val: str) -> tuple[str, bool]:
+    """Return ``(inner_text, stripped_fence)`` when the value is wrapped in ```…```."""
+    t = val.strip()
+    if not t.startswith("```"):
+        return val, False
+    end = t.rfind("```")
+    if end < 3:
+        return val, False
+    inner = t[3:end]
+    inner_stripped = inner.strip()
+    if "\n" in inner_stripped:
+        first, _, rest = inner_stripped.partition("\n")
+        if first and len(first) <= 12 and " " not in first:
+            inner_stripped = rest.strip()
+    return inner_stripped, True
+
+
+def _is_discord_metadata_link_display(val: str) -> bool:
+    v = val.strip()
+    if v.startswith(("http://", "https://")):
+        return True
+    if v.startswith("<http://") or v.startswith("<https://"):
+        return True
+    return v.startswith("[") and "](" in v and v.endswith(")")
+
+
+def _should_fence_metadata_value(
+    *,
+    key: str,
+    had_fence: bool,
+    inner_unwrapped: str,
+    display: str,
+    fence_style: MetadataCodeFenceStyle,
+    fence_keys: tuple[str, ...],
+    plain_keys: tuple[str, ...],
+) -> bool:
+    if key in plain_keys:
+        return False
+    if key in fence_keys:
+        return True
+    if fence_style == "off":
+        return False
+    if _is_discord_metadata_link_display(display):
+        return False
+    if fence_style == "all":
+        return bool(display.strip())
+    if had_fence:
+        return True
+    if not inner_unwrapped.strip():
+        return False
+    if "\n" in inner_unwrapped:
+        return True
+    line = inner_unwrapped.strip()
+    if len(line) >= 48:
+        return True
+    if _UUID_RE.match(line):
+        return True
+    if line.isdigit() and len(line) >= 15:
+        return True
+    if len(line) >= 32 and re.fullmatch(r"[0-9a-fA-F]+", line):
+        return True
+    digitish = sum(1 for c in line if c.isdigit() or c in "-_")
+    if len(line) >= 16 and digitish >= len(line) * 2 // 3:
+        return True
+    return False
+
+
+def _format_metadata_field_value(inner: str, *, use_fence: bool) -> str:
+    if not use_fence:
+        return _truncate(inner, DISCORD_EMBED_FIELD_VALUE_MAX)
+    reserve = 7
+    max_inner = max(0, DISCORD_EMBED_FIELD_VALUE_MAX - reserve)
+    body = _truncate(inner.strip(), max_inner)
+    wrapped = f"```{body}```"
+    if len(wrapped) > DISCORD_EMBED_FIELD_VALUE_MAX:
+        wrapped = wrapped[: DISCORD_EMBED_FIELD_VALUE_MAX - 1] + "…"
+    return wrapped
+
+
 def metadata_to_embed_fields(
     metadata: dict[str, Any],
     *,
     url_link_style: MetadataUrlLinkStyle,
     max_fields: int = DISCORD_EMBED_MAX_FIELDS,
+    metadata_embed_fields_inline: bool = True,
+    metadata_embed_field_order: MetadataEmbedFieldOrder = "plain_then_fenced",
+    metadata_code_fence_style: MetadataCodeFenceStyle = "auto",
+    metadata_code_fence_keys: tuple[str, ...] = (),
+    metadata_plain_keys: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
-    """Turn stringable metadata into Discord embed ``fields`` (sorted keys)."""
-    fields: list[dict[str, Any]] = []
-    for key in sorted(metadata.keys())[:max_fields]:
+    """
+    Turn stringable metadata into Discord embed ``fields``.
+
+    Keys are sorted within each group. With default ``plain_then_fenced`` order,
+    values that receive a code fence (IDs, multiline text, etc.) are listed after
+    plain values so they sit just above an ``Exception`` field when both exist.
+    """
+    entries: list[tuple[str, str, str, bool]] = []
+    for key in sorted(metadata.keys()):
         name = _truncate(str(key), DISCORD_EMBED_FIELD_NAME_MAX)
         raw = metadata[key]
-        val = str(raw)
-        if url_link_style == "markdown" and val.startswith(("http://", "https://")) and "\n" not in val:
-            val = f"[{name}]({val.replace(')', '%29')})"
-        val = _truncate(val, DISCORD_EMBED_FIELD_VALUE_MAX)
-        fields.append({"name": name, "value": val, "inline": len(val) < 80})
-    return fields
+        inner_unwrapped, had_fence = _strip_outer_code_fence(str(raw))
+        display = inner_unwrapped
+        if (
+            url_link_style == "markdown"
+            and display.startswith(("http://", "https://"))
+            and "\n" not in display
+        ):
+            display = f"[{name}]({display.replace(')', '%29')})"
+        use_fence = _should_fence_metadata_value(
+            key=key,
+            had_fence=had_fence,
+            inner_unwrapped=inner_unwrapped,
+            display=display,
+            fence_style=metadata_code_fence_style,
+            fence_keys=metadata_code_fence_keys,
+            plain_keys=metadata_plain_keys,
+        )
+        final_val = _format_metadata_field_value(
+            inner_unwrapped if use_fence else display,
+            use_fence=use_fence,
+        )
+        entries.append((key, name, final_val, use_fence))
+
+    if metadata_embed_field_order == "alphabetical":
+        ordered = sorted(entries, key=lambda e: e[0])
+    else:
+        plain = [e for e in entries if not e[3]]
+        fenced = [e for e in entries if e[3]]
+        ordered = sorted(plain, key=lambda e: e[0]) + sorted(fenced, key=lambda e: e[0])
+
+    cap = max(0, max_fields)
+    out: list[dict[str, Any]] = []
+    for _key, name, final_val, _use_fence in ordered[:cap]:
+        inline = (len(final_val) < 80) if metadata_embed_fields_inline else False
+        out.append({"name": name, "value": final_val, "inline": inline})
+    return out
 
 
 def _embed_header_block(alert: Alert, *, severity_render_style: SeverityRenderStyle = "emoji") -> str:
@@ -168,6 +301,11 @@ def build_alert_embed(
             alert.metadata,
             url_link_style=options.metadata_url_link_style,
             max_fields=max(0, max_meta),
+            metadata_embed_fields_inline=options.metadata_embed_fields_inline,
+            metadata_embed_field_order=options.metadata_embed_field_order,
+            metadata_code_fence_style=options.metadata_code_fence_style,
+            metadata_code_fence_keys=options.metadata_code_fence_keys,
+            metadata_plain_keys=options.metadata_plain_keys,
         )
 
     if need_exc and exception_text:

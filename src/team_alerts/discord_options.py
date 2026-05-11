@@ -10,6 +10,23 @@ from team_alerts.models import SeverityRenderStyle
 
 MetadataUrlLinkStyle = Literal["angle", "markdown"]
 
+MetadataCodeFenceStyle = Literal["auto", "off", "all"]
+"""
+How metadata field values are wrapped in Discord markdown code fences:
+
+* ``auto`` — fence multiline values, long opaque strings, UUIDs/snowflakes, and
+  values that already use a fence; skip short human-readable words and URLs.
+* ``off`` — never add fences (plain text only).
+* ``all`` — wrap every value in a fence (except empty).
+"""
+
+MetadataEmbedFieldOrder = Literal["plain_then_fenced", "alphabetical"]
+"""
+* ``plain_then_fenced`` — non-fenced fields first, then fenced fields, each group
+  sorted by key (fenced block sits just above the ``Exception`` field).
+* ``alphabetical`` — a single list sorted by key (still applies fence styling per value).
+"""
+
 
 @dataclass(slots=True)
 class AllowedMentionsOptions:
@@ -163,6 +180,31 @@ class DiscordTransportOptions:
     embed_footer_append_service_env: bool = False
     """When true and ``embed_footer_text`` is set, also append ``service · env`` to the embed footer."""
 
+    metadata_embed_fields_inline: bool = True
+    """
+    When true (default), metadata embed fields may use Discord's ``inline`` layout
+    for short values (under ~80 characters after truncation). When false, every
+    metadata field uses ``inline: false`` so each key/value occupies a full row.
+    """
+
+    metadata_embed_field_order: MetadataEmbedFieldOrder = "plain_then_fenced"
+    """See :data:`MetadataEmbedFieldOrder`."""
+
+    metadata_code_fence_style: MetadataCodeFenceStyle = "auto"
+    """See :data:`MetadataCodeFenceStyle`."""
+
+    metadata_code_fence_keys: tuple[str, ...] = ()
+    """
+    Metadata keys that always use a code fence when ``metadata_code_fence_style``
+    is ``auto`` (exact key match; applied before heuristics).
+    """
+
+    metadata_plain_keys: tuple[str, ...] = ()
+    """
+    Metadata keys that never use a code fence; overrides
+    ``metadata_code_fence_keys`` and ``all`` style.
+    """
+
     webhook_max_attempts: int = 3
     """
     Total HTTP attempts per webhook POST (including the first). Retries apply only
@@ -229,6 +271,13 @@ class DiscordTransportOptions:
           ``@everyone`` (dangerous; off by default)
         * ``TEAM_ALERTS_WEBHOOK_MAX_ATTEMPTS`` — positive integer; max attempts per
           HTTP POST (default ``3`` when unset)
+        * ``TEAM_ALERTS_METADATA_EMBED_FIELDS_INLINE`` — ``0``/``false``/``no``/``off``
+          for full-width metadata rows; omitted or truthy keeps short-field inline layout
+        * ``TEAM_ALERTS_METADATA_EMBED_FIELD_ORDER`` — ``alphabetical`` (or ``sorted``)
+          vs default ``plain_then_fenced`` (group plain values then fenced)
+        * ``TEAM_ALERTS_METADATA_CODE_FENCE`` — ``off``/``all``/``auto`` (default ``auto``)
+        * ``TEAM_ALERTS_METADATA_CODE_FENCE_KEYS`` / ``TEAM_ALERTS_METADATA_PLAIN_KEYS`` —
+          comma-separated metadata keys for forced fence / no fence
         """
         repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
         ref = (
@@ -290,6 +339,28 @@ class DiscordTransportOptions:
         if max_attempts_raw.isdigit() and int(max_attempts_raw) >= 1:
             webhook_max_attempts = int(max_attempts_raw)
 
+        meta_inline_raw = os.environ.get("TEAM_ALERTS_METADATA_EMBED_FIELDS_INLINE", "").strip().lower()
+        metadata_embed_fields_inline = True
+        if meta_inline_raw in ("0", "false", "no", "off"):
+            metadata_embed_fields_inline = False
+
+        order_raw = os.environ.get("TEAM_ALERTS_METADATA_EMBED_FIELD_ORDER", "").strip().lower()
+        metadata_embed_field_order: MetadataEmbedFieldOrder = "plain_then_fenced"
+        if order_raw in ("alphabetical", "sorted", "alpha"):
+            metadata_embed_field_order = "alphabetical"
+
+        fence_raw = os.environ.get("TEAM_ALERTS_METADATA_CODE_FENCE", "").strip().lower()
+        metadata_code_fence_style: MetadataCodeFenceStyle = "auto"
+        if fence_raw in ("off", "none", "0", "false", "no"):
+            metadata_code_fence_style = "off"
+        elif fence_raw in ("all", "always", "1", "true", "yes", "on"):
+            metadata_code_fence_style = "all"
+
+        fence_keys_raw = os.environ.get("TEAM_ALERTS_METADATA_CODE_FENCE_KEYS", "").strip()
+        metadata_code_fence_keys = tuple(k.strip() for k in fence_keys_raw.split(",") if k.strip())
+        plain_keys_raw = os.environ.get("TEAM_ALERTS_METADATA_PLAIN_KEYS", "").strip()
+        metadata_plain_keys = tuple(k.strip() for k in plain_keys_raw.split(",") if k.strip())
+
         return cls(
             attach_exception_over_chars=threshold,
             exception_attachment_filename=exception_attachment_filename,
@@ -303,6 +374,11 @@ class DiscordTransportOptions:
             alert_footer=alert_footer,
             embed_footer_text=embed_footer,
             webhook_max_attempts=webhook_max_attempts,
+            metadata_embed_fields_inline=metadata_embed_fields_inline,
+            metadata_embed_field_order=metadata_embed_field_order,
+            metadata_code_fence_style=metadata_code_fence_style,
+            metadata_code_fence_keys=metadata_code_fence_keys,
+            metadata_plain_keys=metadata_plain_keys,
         )
 
 

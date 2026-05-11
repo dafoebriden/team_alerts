@@ -144,3 +144,18 @@ def test_merge_kwargs_override_env_even_when_options_matches_default(
         use_embeds=True,
     )
     assert merged.use_embeds is True
+
+
+def test_from_env_metadata_embed_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_EMBED_FIELDS_INLINE", "false")
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_EMBED_FIELD_ORDER", "alphabetical")
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_CODE_FENCE", "off")
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_CODE_FENCE_KEYS", "a,b")
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_PLAIN_KEYS", "c")
+
+    opts = DiscordTransportOptions.from_env()
+    assert opts.metadata_embed_fields_inline is False
+    assert opts.metadata_embed_field_order == "alphabetical"
+    assert opts.metadata_code_fence_style == "off"
+    assert opts.metadata_code_fence_keys == ("a", "b")
+    assert opts.metadata_plain_keys == ("c",)
