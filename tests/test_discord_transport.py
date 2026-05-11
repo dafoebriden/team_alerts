@@ -142,6 +142,25 @@ def test_discord_transport_alert_severity_render_style_overrides_options() -> No
     assert "\u2588" in desc
 
 
+def test_discord_transport_auto_severity_uses_transport_severity_style() -> None:
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.status_code = 204
+    mock_resp.text = ""
+
+    opts = DiscordTransportOptions(severity_render_style="bar")
+    alert = Alert(message="body", severity=Severity.HIGH)
+
+    with patch("team_alerts.transports.discord.requests.post", return_value=mock_resp) as post:
+        transport = DiscordTransport("https://discord.com/api/webhooks/x/y", options=opts)
+        result = transport.send(alert)
+
+    assert result.success is True
+    desc = post.call_args.kwargs["json"]["embeds"][0]["description"]
+    assert "\u2588" in desc
+    assert "\U0001f7e0 **HIGH**" not in desc.split("\n")[0]
+
+
 def test_discord_transport_send_http_error() -> None:
     mock_resp = MagicMock()
     mock_resp.ok = False

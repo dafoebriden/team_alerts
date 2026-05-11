@@ -159,3 +159,34 @@ def test_from_env_metadata_embed_layout(monkeypatch: pytest.MonkeyPatch) -> None
     assert opts.metadata_code_fence_style == "off"
     assert opts.metadata_code_fence_keys == ("a", "b")
     assert opts.metadata_plain_keys == ("c",)
+
+
+def _merge_env_then_partial(*, partial: DiscordTransportOptions) -> DiscordTransportOptions:
+    """Same option merge as :class:`~team_alerts.transports.discord.DiscordTransport` (env, then partial)."""
+
+    return replace(DiscordTransportOptions.from_env(), **partial.nondefault_option_overrides())
+
+
+@pytest.mark.parametrize("truthy", ("1", "true"))
+def test_merge_metadata_embed_fields_inline_explicit_false_overrides_env_truthy(
+    monkeypatch: pytest.MonkeyPatch,
+    truthy: str,
+) -> None:
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_EMBED_FIELDS_INLINE", truthy)
+    partial = DiscordTransportOptions(metadata_embed_fields_inline=False)
+    merged = _merge_env_then_partial(partial=partial)
+    assert merged.metadata_embed_fields_inline is False
+
+
+def test_merge_metadata_embed_fields_inline_env_false_not_overridden_by_partial_default_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``metadata_embed_fields_inline=True`` is the library default, so it is omitted from
+    :meth:`~DiscordTransportOptions.nondefault_option_overrides` and does not clobber env.
+    """
+
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_EMBED_FIELDS_INLINE", "false")
+    partial = DiscordTransportOptions(metadata_embed_fields_inline=True)
+    merged = _merge_env_then_partial(partial=partial)
+    assert merged.metadata_embed_fields_inline is False

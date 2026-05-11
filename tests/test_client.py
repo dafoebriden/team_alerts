@@ -112,3 +112,16 @@ def test_from_discord_webhook_env_option_kwargs(monkeypatch: pytest.MonkeyPatch)
     client = AlertClient.from_discord_webhook_env(use_embeds=False)
     transport = client._transport  # noqa: SLF001
     assert transport.options.use_embeds is False
+
+
+def test_from_discord_webhook_env_partial_inline_true_keeps_env_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/test/token")
+    monkeypatch.setenv("TEAM_ALERTS_METADATA_EMBED_FIELDS_INLINE", "false")
+    client = AlertClient.from_discord_webhook_env(
+        discord_options=DiscordTransportOptions(metadata_embed_fields_inline=True),
+    )
+    transport = client._transport  # noqa: SLF001
+    assert isinstance(transport, DiscordTransport)
+    assert transport.options.metadata_embed_fields_inline is False
